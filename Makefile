@@ -25,10 +25,9 @@ push: build
 	docker push $(REMOTE_IMAGE)
 
 redeploy:
-	scw container container deploy -w $(CONTAINER_ID) image=$(REMOTE_IMAGE)
+	scw container container deploy $(CONTAINER_ID)
 
 deploy: push redeploy
-	scw container container logs $(CONTAINER_ID) --since 5m --follow || true
 
 lint:
 	$(PYTHON) -m compileall .

@@ -24,7 +24,7 @@ class ChannelConfig:
 @dataclass(slots=True)
 class OpenAIConfig:
     api_key: str
-    model: str = "gpt-5.1-mini"
+    model: str = "gpt-4o-mini"
     temperature: float = 0.1
     image_model: str | None = None
 

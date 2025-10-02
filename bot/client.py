@@ -88,6 +88,8 @@ class LaCommuDiscordBot(commands.Bot):
             )
 
             if not jobs_data:
+                if issues:
+                    logger.warning("📝 Job parsing produced no results: %s", " | ".join(issues))
                 embed = create_error_embed(
                     title="Post failed",
                     description="No job listings were detected.",
@@ -146,6 +148,8 @@ class LaCommuDiscordBot(commands.Bot):
             )
 
             if not jobs_data:
+                if issues:
+                    logger.warning("📝 Job preview produced no results: %s", " | ".join(issues))
                 embed = create_error_embed(
                     title="Preview failed",
                     description="No job listings were detected.",

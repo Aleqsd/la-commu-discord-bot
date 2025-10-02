@@ -111,7 +111,8 @@ def _extract_jobs(text: str) -> List[Dict[str, Any]]:
         obj_start = text.find("{")
         obj_end = text.rfind("}")
         if obj_start == -1 or obj_end == -1:
-            logger.warning("⚠️ No JSON payload detected in OpenAI response")
+            preview = text[:200].replace("\n", " ")
+            logger.warning("⚠️ No JSON payload detected in OpenAI response (preview: %s...)", preview)
             return []
         json_str = text[obj_start : obj_end + 1]
     else:
@@ -120,7 +121,11 @@ def _extract_jobs(text: str) -> List[Dict[str, Any]]:
     try:
         data = json.loads(json_str)
     except json.JSONDecodeError as exc:
-        logger.warning("⚠️ Failed to parse OpenAI JSON: %s", exc)
+        logger.warning(
+            "⚠️ Failed to parse OpenAI JSON: %s | snippet=%s",
+            exc,
+            json_str[:200].replace("\n", " "),
+        )
         return []
 
     if isinstance(data, dict):

@@ -16,7 +16,7 @@
 ## Requirements
 - Python 3.12+ (or Docker)
 - Discord bot token with the **Message Content Intent** enabled.
-- OpenAI API key (default model: `gpt-5.1-mini`; optional vision model override).
+- OpenAI API key (default model: `gpt-4o-mini`; optional vision model override).
 
 ## Setup (Local)
 1. Copy `.env.example` to `.env` and fill in your secrets.
@@ -48,7 +48,7 @@
 | --- | --- | --- |
 | `DISCORD_BOT_TOKEN` | Discord bot token. | — |
 | `OPENAI_API_KEY` | OpenAI API key. | — |
-| `OPENAI_MODEL` | OpenAI text model name. | `gpt-5.1-mini` |
+| `OPENAI_MODEL` | OpenAI text model name. | `gpt-4o-mini` |
 | `OPENAI_IMAGE_MODEL` | Optional OpenAI vision-capable model. | mirrors `OPENAI_MODEL` |
 | `OPENAI_TEMPERATURE` | Model temperature. | `0.1` |
 | `JOB_TEAM_CHANNEL_IDS` | Comma-separated mapping of team→channel ID (e.g. `art:123,...`). IDs must belong to the same guild where the bot runs. | — |

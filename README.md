@@ -1,6 +1,19 @@
 # la-commu-discord-bot
 
-`la-commu-discord-bot` offers slash commands that scrape job links (and referenced images), extract structured data with the OpenAI API, and redistribute formatted embeds to speciality channels (`art`, `game-design`, `dev`, `others`).
+`la-commu-discord-bot` is a Discord bot packaged for Scaleway Serverless Containers. It exposes slash commands that scrape job links (and referenced images), extract structured data with the OpenAI API, and redistribute formatted embeds to speciality channels (`art`, `game-design`, `dev`, `others`).
+
+## Quick Start
+1. Clone the repo and copy `.env.example` to `.env` with your Discord token, OpenAI key, and channel IDs.
+2. Install dependencies globally:
+   ```bash
+   python -m pip install -r requirements.txt
+   ```
+3. Run the bot locally:
+   ```bash
+   python main.py
+   ```
+   Optional helpers via `make`: `make build`, `make test`, `make deploy`.
+
 
 ## Features
 - `/jobbot post` ingests job links or posters and fans them out to the right team channels.
@@ -35,13 +48,13 @@
 ## Testing
 1. Install test tooling (after the runtime deps above):
    ```bash
-   python3 -m pip install -r requirements-test.txt
+   python -m pip install -r requirements-test.txt
    ```
 2. Run the full suite:
    ```bash
-   python3 -m pytest
+   python -m pytest
    ```
-   Use `python3 -m pytest -k utils` to target specific modules or add `-vv` for verbose logs.
+   Or simply run `make test`.
 
 ## Environment Variables
 | Variable | Description | Default |
@@ -67,6 +80,12 @@
 5. Detailed logs keep track of progress (`🌐`, `🖼️`, `📤`, etc.), while command responses surface any parsing or routing issues.
 
 Supported teams by default are `art`, `game_design`, `dev`, and `others`. You can extend this list by adding additional `team:id` pairs to `JOB_TEAM_CHANNEL_IDS`; any unmapped team falls back to posting issues in-command.
+
+## Scaleway Delivery Model
+- Docker image is built locally (`make build`) and pushed to the Scaleway Container Registry (`make push`).
+- Serverless container (Always On) pulls `rg.fr-par.scw.cloud/la-commu-discord-bot/la-commu-discord-bot:latest` and runs the bot.
+- `PORT` exposes a lightweight health server so Scaleway health checks succeed.
+- `make deploy` combines push + redeploy and tails logs to confirm startup.
 
 ## Slash Commands
 - `/jobbot post [reference]` — Parse job URLs/posters and publish embeds to the team channels.

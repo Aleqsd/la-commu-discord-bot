@@ -1,41 +1,42 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `main.py` boots the `LaCommuDiscordBot`, wiring config and the OpenAI parser.
-- `bot/` hosts core modules: `client.py` (Discord logic and slash commands), `formatter.py` (embeds & error cards), `scraping.py` (HTTP + HTML/image handling), `openai_client.py` (text/vision parsing), and `models.py`/`utils.py` for shared dataclasses and helpers.
-- `requirements.txt`, `.env.example`, `Dockerfile`, and `README.md` sit at root for dependency management, configuration, and containerization assets.
+- `main.py` boots the `LaCommuDiscordBot`, wiring config, the OpenAI parser, and the aiohttp health server used by Scaleway.
+- `bot/` hosts core modules: `client.py` (Discord logic and slash commands), `formatter.py` (embeds & error cards), `scraping.py` (HTTP + HTML/image handling), `openai_client.py` (text/vision parsing), `health.py` (health endpoint), and `models.py`/`utils.py`.
+- `requirements.txt`, `.env.example`, `Dockerfile`, `Makefile`, and `README.md` sit at root for dependency management, automation, and docs.
 
 ## Operational Workflow
 - Primary entrypoints are `/jobbot post` (parse & publish) and `/jobbot preview` (parse-only).
-- `reference` text can include regular URLs or `image: https://...` markers pointing at poster images.
+- `reference` text can include regular URLs or `image: https://...` markers; images are sent directly to OpenAI via `image_url`.
 - `/jobbot status` reveals current routing (Manage Guild permission required).
-- A lightweight `aiohttp` health server listens on the env `PORT` (default 8080) to satisfy hosting probes.
+- A lightweight `aiohttp` health server listens on env `PORT` (default 8080) to satisfy Scaleway probes.
+- Makefile targets (`build`, `push`, `deploy`, `test`) automate the Docker/Scaleway flow. Container `2fed6267-5ce1-4331-80f8-241f411a782e` deploys `rg.fr-par.scw.cloud/la-commu-discord-bot/la-commu-discord-bot:latest`.
 
 ## Build, Test, and Development Commands
-- `python3 -m ensurepip --upgrade` (if `pip` is missing) then `python3 -m pip install --upgrade pip` — prep your global interpreter.
-- `python3 -m pip install -r requirements.txt` — install runtime dependencies (discord.py, httpx, openai, etc.).
-- `python3 main.py` — run the bot with your system Python.
-- `python3 -m compileall .` — quick syntax smoke check across all modules.
-- `docker build -t la-commu-discord-bot .` / `docker run --env-file .env la-commu-discord-bot` — container workflow.
+- `python -m pip install -r requirements.txt` — install runtime dependencies.
+- `python main.py` — run the bot locally.
+- `python -m compileall .` — quick syntax smoke check.
+- `docker build -t la-commu-discord-bot .` / `docker push ...` — container workflow.
+- `make build|push|deploy|test` — convenience targets.
 
 ## Coding Style & Naming Conventions
-- Target Python 3.12, using `from __future__ import annotations` and type hints throughout.
-- Prefer dataclasses for structured data and async/await for I/O.
-- Keep logging consistent with existing emoji-prefixed messages; use structured titles for errors (`create_error_embed`).
-- Stick to snake_case for modules, functions, and variables; PascalCase for classes (e.g., `LaCommuDiscordBot`).
+- Target Python 3.12+, use annotations and type hints.
+- Dataclasses for structured data; async/await for I/O.
+- Keep logging consistent with emoji-prefixed messages.
+- snake_case for modules/functions, PascalCase for classes.
 
 ## Testing Guidelines
-- Automated tests live under `tests/` and use `pytest` + `pytest-asyncio` (install via `python3 -m pip install -r requirements-test.txt`).
-- Add new cases as `test_<feature>.py`; prefer mocking over live HTTP/Discord calls.
-- Run `python3 -m pytest` locally before pushing; CI-compatible command is the same.
-- Manual validation still matters: exercise `/jobbot` slash commands in a staging guild and confirm auto triage with sample URLs/images.
+- Tests live under `tests/` and use pytest + pytest-asyncio.
+- Install deps via `python -m pip install -r requirements-test.txt` and run `python -m pytest` (or `make test`).
+- Prefer mocking over live HTTP/Discord calls; manually validate slash commands in staging.
 
 ## Commit & Pull Request Guidelines
-- Craft commits with concise, imperative subjects (e.g., `Add slash command preview flow`).
-- For pull requests, include: summary of changes, testing notes (commands run), and screenshots/log excerpts for Discord-facing updates.
-- Reference relevant issues or TODOs, and call out configuration changes (env vars, channel mappings) in the description.
+- Write imperative commit subjects.
+- For PRs include summary, testing notes, and screenshots/log excerpts for Discord-facing changes.
+- Call out env/config changes explicitly.
 
 ## Security & Configuration Tips
-- Never commit real `.env` files or API keys; rely on `.env.example` for placeholders.
-- Ensure Discord bots have Message Content intent enabled and OpenAI keys scoped appropriately.
-- Populate `JOB_TEAM_CHANNEL_IDS` with numeric IDs (art, game_design, dev, others) so routing stays stable even after channel renames.
+- Never commit secrets; rely on `.env.example`.
+- Ensure the Discord bot has Message Content intent enabled.
+- Keep `JOB_TEAM_CHANNEL_IDS` in sync with live channel IDs.
+- Rotate registry tokens and Discord/OpenAI keys as needed.

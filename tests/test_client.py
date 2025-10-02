@@ -24,6 +24,9 @@ class FakeGuild:
                 return channel
         return None
 
+    async def fetch_channel(self, channel_id):
+        return self.get_channel(channel_id)
+
 
 class FakeChannel:
     def __init__(self, name, channel_id):

@@ -311,6 +311,14 @@ class LaCommuDiscordBot(commands.Bot):
                             exc,
                         )
                         continue
+                if channel is None:
+                    logger.warning(
+                        "⚠️ Channel id %s for team %s still unresolved in guild %s",
+                        channel_id,
+                        team,
+                        active_guild.id,
+                    )
+                    continue
 
                 self.team_channels[f"{active_guild.id}:{team}"] = channel.id
                 logger.info(
@@ -368,6 +376,14 @@ class LaCommuDiscordBot(commands.Bot):
                     exc,
                 )
                 return None
+        if channel is None:
+            logger.warning(
+                "⚠️ Channel id %s for team %s could not be resolved in guild %s",
+                configured_id,
+                team,
+                guild.id,
+            )
+            return None
 
         self.team_channels[key] = channel.id
         logger.info(

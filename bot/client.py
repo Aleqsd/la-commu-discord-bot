@@ -11,8 +11,8 @@ from .config import BotConfig
 from .formatter import create_job_embed, create_error_embed
 from .models import JobPosting
 from .openai_client import OpenAIJobParser
-from .scraping import fetch_image_bytes, fetch_page_text
-from .utils import extract_image_urls, extract_urls, sanitize_team, to_base64
+from .scraping import fetch_page_text
+from .utils import extract_image_urls, extract_urls, sanitize_team
 
 logger = logging.getLogger(__name__)
 
@@ -393,21 +393,10 @@ class LaCommuDiscordBot(commands.Bot):
     async def _parse_image_jobs(
         self,
         url: str,
-        *,
-        image_bytes: bytes | None = None,
     ) -> tuple[List[Dict[str, object]], Optional[str]]:
         logger.info("🖼️ Parsing job image: %s", url)
-        if image_bytes is None:
-            image_bytes = await fetch_image_bytes(
-                url,
-                timeout=self.config.request_timeout,
-                max_bytes=self.config.max_image_bytes,
-            )
-            if not image_bytes:
-                return [], f"Couldn't download image from {url}"
-
         jobs_data = await self.parser.parse_from_image(
-            image_b64=to_base64(image_bytes),
+            image_url=url,
             url=url,
         )
         if not jobs_data:

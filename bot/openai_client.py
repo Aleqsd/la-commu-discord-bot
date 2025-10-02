@@ -50,11 +50,11 @@ class OpenAIJobParser:
         raw_text = await self._call_openai(messages, model=self._text_model)
         return _extract_jobs(raw_text)
 
-    async def parse_from_image(self, *, image_b64: str, url: str) -> List[Dict[str, Any]]:
-        if not image_b64:
+    async def parse_from_image(self, *, image_url: str, url: str) -> List[Dict[str, Any]]:
+        if not image_url:
             return []
         prompt = IMAGE_PROMPT_TEMPLATE.format(url=url)
-        messages = _build_image_messages(prompt, image_b64)
+        messages = _build_image_messages(prompt, image_url)
         raw_text = await self._call_openai(messages, model=self._image_model)
         return _extract_jobs(raw_text)
 
@@ -84,14 +84,14 @@ def _build_text_messages(prompt: str) -> List[Dict[str, Any]]:
     ]
 
 
-def _build_image_messages(prompt: str, image_b64: str) -> List[Dict[str, Any]]:
+def _build_image_messages(prompt: str, image_url: str) -> List[Dict[str, Any]]:
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
             "content": [
                 {"type": "input_text", "text": prompt},
-                {"type": "input_image", "image_base64": image_b64},
+                {"type": "input_image", "image_url": {"url": image_url}},
             ],
         },
     ]

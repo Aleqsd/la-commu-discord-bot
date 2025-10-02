@@ -1,0 +1,22 @@
+# Environment & secrets
+.env
+.env.*
+
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+
+# Version control & metadata
+.git
+.gitignore
+
+# Tooling / docs not needed in runtime image
+README.md
+AGENTS.md
+tests/

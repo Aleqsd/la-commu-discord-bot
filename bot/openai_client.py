@@ -91,7 +91,7 @@ def _build_image_messages(prompt: str, image_url: str) -> List[Dict[str, Any]]:
             "role": "user",
             "content": [
                 {"type": "input_text", "text": prompt},
-                {"type": "input_image", "image_url": {"url": image_url}},
+                {"type": "input_image", "image_url": image_url},
             ],
         },
     ]

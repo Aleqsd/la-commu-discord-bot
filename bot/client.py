@@ -82,7 +82,11 @@ class LaCommuDiscordBot(commands.Bot):
                 )
                 return
 
-            await interaction.response.defer(thinking=True, ephemeral=True)
+            try:
+                await interaction.response.defer(thinking=True, ephemeral=True)
+            except discord.NotFound:
+                logger.warning("⚠️ Interaction expired before defer in jobbot_post")
+                return
             jobs_data, issues = await self._collect_jobs(
                 reference=reference,
             )
@@ -123,7 +127,7 @@ class LaCommuDiscordBot(commands.Bot):
                     inline=False,
                 )
 
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await self._safe_followup(interaction, embed=embed, ephemeral=True)
 
         @jobbot_group.command(name="preview", description="Preview channel routing for a job reference")
         @app_commands.describe(
@@ -142,7 +146,11 @@ class LaCommuDiscordBot(commands.Bot):
                 )
                 return
 
-            await interaction.response.defer(thinking=True, ephemeral=True)
+            try:
+                await interaction.response.defer(thinking=True, ephemeral=True)
+            except discord.NotFound:
+                logger.warning("⚠️ Interaction expired before defer in jobbot_preview")
+                return
             jobs_data, issues = await self._collect_jobs(
                 reference=reference,
             )
@@ -183,7 +191,7 @@ class LaCommuDiscordBot(commands.Bot):
             embed.add_field(name="Jobs Found", value=str(len(jobs_data)), inline=True)
             if issues:
                 embed.add_field(name="Notes", value="\n".join(issues)[:1000], inline=False)
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await self._safe_followup(interaction, embed=embed, ephemeral=True)
 
         self.tree.add_command(jobbot_group)
 
@@ -369,6 +377,18 @@ class LaCommuDiscordBot(commands.Bot):
             guild.id,
         )
         return channel  # type: ignore[return-value]
+
+    async def _safe_followup(
+        self,
+        interaction: discord.Interaction,
+        *,
+        embed: discord.Embed,
+        ephemeral: bool,
+    ) -> None:
+        try:
+            await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+        except discord.NotFound:
+            logger.warning("⚠️ Interaction expired before followup could be sent")
 
     async def _parse_page_jobs(self, url: str) -> tuple[List[Dict[str, object]], Optional[str]]:
         logger.info("🌐 Parsing job page: %s", url)

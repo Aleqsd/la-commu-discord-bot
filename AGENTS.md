@@ -11,6 +11,7 @@
 - `/jobbot status` reveals current routing (Manage Guild permission required).
 - A lightweight `aiohttp` health server listens on env `PORT` (default 8080) to satisfy Scaleway probes.
 - Makefile targets (`build`, `push`, `deploy`, `test`) automate the Docker/Scaleway flow. Container `2fed6267-5ce1-4331-80f8-241f411a782e` deploys `rg.fr-par.scw.cloud/la-commu-discord-bot/la-commu-discord-bot:latest`.
+- Slash-command requests are persisted; unfinished `/jobbot post` submissions are retried automatically on startup (max 3 attempts).
 
 ## Build, Test, and Development Commands
 - `python -m pip install -r requirements.txt` — install runtime dependencies.

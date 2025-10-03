@@ -117,6 +117,7 @@ If you rotate registry credentials, run `docker login rg.fr-par.scw.cloud/la-com
 - The OpenAI API call runs in a background thread to avoid blocking the event loop.
 - The bot adds a ✅ reaction when at least one job is posted; otherwise it replies with diagnostics.
 - Tests mock external services; avoid running them while the bot is logged into production to keep logs clean.
+- Slash-command submissions are persisted; if the bot restarts mid-process they are retried automatically (up to three attempts).
 - A lightweight health server responds on `PORT` (default `8080`) so hosting platforms can probe readiness.
 
 ## Future Enhancements

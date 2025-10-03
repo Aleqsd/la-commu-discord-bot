@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Dict, List, Optional
 
@@ -11,6 +12,7 @@ from .config import BotConfig
 from .formatter import create_job_embed, create_error_embed
 from .models import JobPosting
 from .openai_client import OpenAIJobParser
+from .retry import PendingRequest, RetryManager
 from .scraping import fetch_page_text
 from .utils import extract_image_urls, extract_urls, sanitize_team
 
@@ -18,7 +20,12 @@ logger = logging.getLogger(__name__)
 
 
 class LaCommuDiscordBot(commands.Bot):
-    def __init__(self, config: BotConfig, parser: OpenAIJobParser) -> None:
+    def __init__(
+        self,
+        config: BotConfig,
+        parser: OpenAIJobParser,
+        retry_manager: RetryManager,
+    ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         intents.messages = True
@@ -26,8 +33,10 @@ class LaCommuDiscordBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
         self.config = config
         self.parser = parser
+        self.retry_manager = retry_manager
         self.team_channels: Dict[str, int] = {}
         self._register_app_commands()
+        self._ready_logged = False
 
     def _register_app_commands(self) -> None:
         jobbot_group = app_commands.Group(
@@ -87,47 +96,72 @@ class LaCommuDiscordBot(commands.Bot):
             except discord.NotFound:
                 logger.warning("⚠️ Interaction expired before defer in jobbot_post")
                 return
-            jobs_data, issues = await self._collect_jobs(
+            await self.retry_manager.start_request(
+                request_id=interaction.id,
+                guild_id=guild.id,
+                user_id=interaction.user.id,
                 reference=reference,
             )
-
-            if not jobs_data:
-                if issues:
-                    logger.warning("📝 Job parsing produced no results: %s", " | ".join(issues))
-                embed = create_error_embed(
-                    title="Post failed",
-                    description="No job listings were detected.",
-                    details="\n".join(issues) if issues else "Inspect the provided reference and try again.",
-                )
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                return
-
-            posted_jobs, dispatch_issues = await self._post_jobs(jobs_data, guild)
-            issues.extend(dispatch_issues)
-
-            if posted_jobs:
-                lines = [
-                    f"• {job.job_title} @ {job.company_name} → {channel.mention}"
-                    for job, channel in posted_jobs
-                ]
-                description = "\n".join(lines)
-            else:
-                description = "No jobs were posted because of routing errors."
-
-            embed = discord.Embed(
-                title="📬 Job posting summary",
-                description=description,
-                color=discord.Color.green() if posted_jobs else discord.Color.orange(),
+            request_summary = reference.strip().splitlines()[0][:200]
+            logger.info(
+                "🎯 jobbot post by %s (interaction %s): %s",
+                interaction.user,
+                interaction.id,
+                request_summary,
             )
-            embed.add_field(name="Jobs Posted", value=str(len(posted_jobs)), inline=True)
-            if issues:
-                embed.add_field(
-                    name="Notes",
-                    value="\n".join(issues)[:1000],
-                    inline=False,
+            try:
+                jobs_data, issues = await self._collect_jobs(
+                    reference=reference,
                 )
 
-            await self._safe_followup(interaction, embed=embed, ephemeral=True)
+                if not jobs_data:
+                    if issues:
+                        logger.warning("📝 Job parsing produced no results: %s", " | ".join(issues))
+                    embed = create_error_embed(
+                        title="Post failed",
+                        description="No job listings were detected.",
+                        details="\n".join(issues) if issues else "Inspect the provided reference and try again.",
+                    )
+                    await self._safe_followup(interaction, embed=embed, ephemeral=True)
+                    await self.retry_manager.complete_request(interaction.id)
+                    return
+
+                posted_jobs, dispatch_issues = await self._post_jobs(jobs_data, guild)
+                issues.extend(dispatch_issues)
+                logger.info(
+                    "📚 jobbot post result interaction %s: posted=%d issues=%d",
+                    interaction.id,
+                    len(posted_jobs),
+                    len(issues),
+                )
+
+                if posted_jobs:
+                    lines = [
+                        f"• {job.job_title} @ {job.company_name} → {channel.mention}"
+                        for job, channel in posted_jobs
+                    ]
+                    description = "\n".join(lines)
+                else:
+                    description = "No jobs were posted because of routing errors."
+
+                embed = discord.Embed(
+                    title="📬 Job posting summary",
+                    description=description,
+                    color=discord.Color.green() if posted_jobs else discord.Color.orange(),
+                )
+                embed.add_field(name="Jobs Posted", value=str(len(posted_jobs)), inline=True)
+                if issues:
+                    embed.add_field(
+                        name="Notes",
+                        value="\n".join(issues)[:1000],
+                        inline=False,
+                    )
+
+                await self._safe_followup(interaction, embed=embed, ephemeral=True)
+                await self.retry_manager.complete_request(interaction.id)
+            except Exception as exc:  # noqa: BLE001
+                await self.retry_manager.fail_request(interaction.id, repr(exc))
+                raise
 
         @jobbot_group.command(name="preview", description="Preview channel routing for a job reference")
         @app_commands.describe(
@@ -151,6 +185,13 @@ class LaCommuDiscordBot(commands.Bot):
             except discord.NotFound:
                 logger.warning("⚠️ Interaction expired before defer in jobbot_preview")
                 return
+            request_summary = reference.strip().splitlines()[0][:200]
+            logger.info(
+                "🎯 jobbot preview by %s (interaction %s): %s",
+                interaction.user,
+                interaction.id,
+                request_summary,
+            )
             jobs_data, issues = await self._collect_jobs(
                 reference=reference,
             )
@@ -163,7 +204,7 @@ class LaCommuDiscordBot(commands.Bot):
                     description="No job listings were detected.",
                     details="\n".join(issues) if issues else "Inspect the provided reference and try again.",
                 )
-                await interaction.followup.send(embed=embed, ephemeral=True)
+                await self._safe_followup(interaction, embed=embed, ephemeral=True)
                 return
 
             lines = []
@@ -191,6 +232,12 @@ class LaCommuDiscordBot(commands.Bot):
             embed.add_field(name="Jobs Found", value=str(len(jobs_data)), inline=True)
             if issues:
                 embed.add_field(name="Notes", value="\n".join(issues)[:1000], inline=False)
+            logger.info(
+                "📚 jobbot preview result interaction %s: jobs=%d issues=%d",
+                interaction.id,
+                len(jobs_data),
+                len(issues),
+            )
             await self._safe_followup(interaction, embed=embed, ephemeral=True)
 
         self.tree.add_command(jobbot_group)
@@ -198,9 +245,14 @@ class LaCommuDiscordBot(commands.Bot):
     async def setup_hook(self) -> None:
         await self._cache_team_channels()
         await self.tree.sync()
+        asyncio.create_task(self._resume_pending_requests())
 
     async def on_ready(self) -> None:
-        logger.info("🚀 Logged in as %s (ID: %s)", self.user, self.user and self.user.id)
+        if not self._ready_logged:
+            logger.info("🚀 Logged in as %s (ID: %s)", self.user, self.user and self.user.id)
+            self._ready_logged = True
+        else:
+            logger.debug("🔁 Session resumed as %s (ID: %s)", self.user, self.user and self.user.id)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild:
@@ -405,6 +457,72 @@ class LaCommuDiscordBot(commands.Bot):
             await interaction.followup.send(embed=embed, ephemeral=ephemeral)
         except discord.NotFound:
             logger.warning("⚠️ Interaction expired before followup could be sent")
+
+    async def _resume_pending_requests(self) -> None:
+        await self.wait_until_ready()
+        pending = await self.retry_manager.list_pending_requests()
+        if not pending:
+            return
+        logger.info("🔁 Resuming %d pending job request(s)", len(pending))
+        for entry in pending:
+            if entry.attempts >= self.retry_manager.max_attempts:
+                logger.warning(
+                    "⚠️ Skipping request %s after %s attempts (last error: %s)",
+                    entry.request_id,
+                    entry.attempts,
+                    entry.last_error,
+                )
+                continue
+            try:
+                success = await self._retry_request(entry)
+            except Exception as exc:  # noqa: BLE001
+                await self.retry_manager.fail_request(entry.request_id, repr(exc))
+                logger.exception("🚫 Retry failed for request %s", entry.request_id)
+            else:
+                if success:
+                    await self.retry_manager.complete_request(entry.request_id)
+                else:
+                    await self.retry_manager.fail_request(entry.request_id, "Retry produced no jobs")
+            await asyncio.sleep(1)
+
+    async def _retry_request(self, entry: PendingRequest) -> bool:
+        guild = self.get_guild(entry.guild_id)
+        if guild is None:
+            try:
+                guild = await self.fetch_guild(entry.guild_id)
+            except discord.DiscordException as exc:
+                logger.warning(
+                    "⚠️ Retry request %s: cannot access guild %s (%s)",
+                    entry.request_id,
+                    entry.guild_id,
+                    exc,
+                )
+                return False
+        logger.info(
+            "🔁 Retrying request %s for guild %s (attempt %s/%s)",
+            entry.request_id,
+            entry.guild_id,
+            entry.attempts + 1,
+            self.retry_manager.max_attempts,
+        )
+        jobs_data, issues = await self._collect_jobs(reference=entry.reference)
+        if not jobs_data:
+            if issues:
+                logger.warning(
+                    "📝 Retry request %s produced no jobs: %s",
+                    entry.request_id,
+                    " | ".join(issues),
+                )
+            return False
+        posted_jobs, dispatch_issues = await self._post_jobs(jobs_data, guild)
+        issues.extend(dispatch_issues)
+        logger.info(
+            "📚 Retry request %s result: posted=%d issues=%d",
+            entry.request_id,
+            len(posted_jobs),
+            len(issues),
+        )
+        return True
 
     async def _parse_page_jobs(self, url: str) -> tuple[List[Dict[str, object]], Optional[str]]:
         logger.info("🌐 Parsing job page: %s", url)

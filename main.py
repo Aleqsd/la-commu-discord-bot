@@ -14,14 +14,16 @@ from bot.openai_client import OpenAIJobParser
 from bot.retry import RetryManager
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+DEFAULT_LOG_FILE = Path("job-caster.log")
 logger = logging.getLogger(__name__)
 
 
 def configure_logging(log_file: Path | None) -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler()]
-    if log_file:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file))
+    destination = DEFAULT_LOG_FILE if log_file is None else log_file
+    if destination:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(destination))
 
     logging.basicConfig(
         level=LOG_LEVEL,
@@ -36,12 +38,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--log-file",
         type=Path,
-        help="Optional path to a file where logs should also be written.",
+        help=f"Path to a log file (default: {DEFAULT_LOG_FILE}).",
     )
     return parser.parse_args(argv)
 
 
-configure_logging(None)
+configure_logging(DEFAULT_LOG_FILE)
 
 
 async def run_bot() -> None:

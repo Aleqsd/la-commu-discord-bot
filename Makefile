@@ -8,7 +8,7 @@ JOURNALCTL?=sudo journalctl
 PYTHON?=python
 export PYTHONPATH:=$(PWD)
 
-.PHONY: help build push redeploy deploy lint test clean systemd-restart systemd-tail
+.PHONY: help build push redeploy deploy lint test clean systemd-restart systemd-tail tail
 
 help:
 	@echo "Available targets:"
@@ -21,6 +21,7 @@ help:
 	@echo "  make clean       # Remove build caches"
 	@echo "  make systemd-restart  # Restart the systemd service (uses SYSTEMCTL/SYSTEMD_UNIT)"
 	@echo "  make systemd-tail     # Follow journalctl logs for the service"
+	@echo "  make tail        # Tail the log file (requires --log-file in ExecStart)"
 
 build:
 	docker build -t $(IMAGE) .
@@ -49,3 +50,6 @@ systemd-restart:
 
 systemd-tail:
 	$(JOURNALCTL) -u $(SYSTEMD_UNIT) -f
+
+tail:
+	tail -f $(SYSTEMD_UNIT).log

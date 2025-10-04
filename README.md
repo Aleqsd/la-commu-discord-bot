@@ -14,7 +14,7 @@
    python main.py
    ```
    Optional helpers via `make`: `make build`, `make test`, `make deploy`.
-   Add `--log-file logs/bot.log` to mirror console output into a file (the directory is created automatically).
+   Logs are also written to `job-caster.log` in the project root; use `--log-file logs/bot.log` (or another path) to change the destination.
 
 ## Features
 
@@ -48,7 +48,7 @@
    python3 main.py
    ```
    Tip: set `JOB_TEAM_CHANNEL_IDS` (see below) before launching so the bot knows where to route each specialty (art, game_design, dev, others).
-   Add `--log-file logs/bot.log` if you also want persistent log files.
+   Logs also go to `job-caster.log` by default; override with `--log-file path/to/log.log` if you prefer another location.
 
 ## Testing
 

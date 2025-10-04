@@ -27,6 +27,7 @@
 - Slash commands return friendly, developer-focused feedback (with troubleshooting notes when parsing fails).
 - Configurable channel mapping and OpenAI models (separate text vs. vision) via environment variables.
 - Ready-to-run Docker image.
+- Skips reposting jobs that were already shared by tracking their URLs in `data/posted_jobs.log`.
 
 ## Requirements
 
@@ -153,6 +154,7 @@ The helper tags the local image as `ghcr.io/<namespace>/<IMAGE>` (defaults to `l
 - Slash-command submissions are persisted; if the bot restarts mid-process they are retried automatically (up to three attempts).
 - A lightweight health server responds on `PORT` (default `8080`) so hosting platforms can probe readiness.
 - UptimeRobot watches the public health check at https://stats.uptimerobot.com/Q2aJxylmN9/801513961 to alert if the Droplet stops responding.
+- Duplicate protection stores identifiers in `data/posted_jobs.log`; remove a line if you need to re-post a specific offer.
 
 ## Future Enhancements
 
@@ -189,16 +191,13 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-[Unit]
-Description=Discord Bot La Commu
-After=network.target
-
-[Service]
 Type=simple
-User=root
-WorkingDirectory=/root/la-commu-discord-bot
-ExecStart=/root/la-commu-discord-bot/.venv/bin/python main.py
-EnvironmentFile=/etc/la-commu-discord-bot.env
+User=ubuntu                        # change if needed
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/la-commu-discord-bot
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=-/home/ubuntu/la-commu-discord-bot/.env
+ExecStart=/home/ubuntu/la-commu-discord-bot/.venv/bin/python /home/ubuntu/la-commu-discord-bot/main.py --log-file /home/ubuntu/la-commu-discord-bot/logs/jobbot.log
 Restart=always
 RestartSec=3
 
@@ -207,7 +206,7 @@ WantedBy=multi-user.target
 ```
 
 > `EnvironmentFile` loads your `.env` secrets (Discord token, OpenAI key, etc.).
-> `--log-file` mirrors console output into `/la-commu-discord-bot/logs/jobbot.log`; change the path if you prefer a different location.
+> `--log-file` mirrors console output into `/home/ubuntu/la-commu-discord-bot/logs/jobbot.log`; change the path if you prefer a different location.
 
 ### 3. Enable and start the service
 

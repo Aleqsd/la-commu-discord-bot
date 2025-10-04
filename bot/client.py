@@ -11,6 +11,7 @@ from discord.ext import commands
 from .config import BotConfig
 from .formatter import create_job_embed, create_error_embed
 from .models import JobPosting
+from .history import PostHistory
 from .openai_client import OpenAIJobParser
 from .retry import PendingRequest, RetryManager
 from .scraping import fetch_page_text
@@ -25,6 +26,7 @@ class LaCommuDiscordBot(commands.Bot):
         config: BotConfig,
         parser: OpenAIJobParser,
         retry_manager: RetryManager,
+        post_history: PostHistory,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -34,6 +36,7 @@ class LaCommuDiscordBot(commands.Bot):
         self.config = config
         self.parser = parser
         self.retry_manager = retry_manager
+        self.post_history = post_history
         self.team_channels: Dict[str, int] = {}
         self._register_app_commands()
         self._ready_logged = False
@@ -273,6 +276,19 @@ class LaCommuDiscordBot(commands.Bot):
             data.setdefault("source_url", origin)
             job = JobPosting.from_dict(data)
             team_key = sanitize_team(job.team)
+
+            if await self.post_history.is_posted(job):
+                issues.append(
+                    f"Skipped duplicate `{job.job_title}` ({origin or 'unknown origin'})."
+                )
+                logger.info(
+                    "🔁 Duplicate job ignored: '%s' origin=%s guild=%s",
+                    job.job_title,
+                    origin or "unknown",
+                    guild.id,
+                )
+                continue
+
             channel = await self._resolve_team_channel(guild, team_key)
             if not channel:
                 issues.append(
@@ -308,6 +324,7 @@ class LaCommuDiscordBot(commands.Bot):
                 channel.name,
                 guild.id,
             )
+            await self.post_history.mark_posted(job)
 
         return posted_jobs, issues
 

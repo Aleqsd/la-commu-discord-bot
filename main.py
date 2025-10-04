@@ -10,6 +10,7 @@ from typing import Sequence
 from bot.client import LaCommuDiscordBot
 from bot.config import load_config
 from bot.health import HealthServer
+from bot.history import PostHistory
 from bot.openai_client import OpenAIJobParser
 from bot.retry import RetryManager
 
@@ -50,7 +51,9 @@ async def run_bot() -> None:
     config = load_config()
     parser = OpenAIJobParser(config.openai)
     retry_manager = RetryManager(Path("data/pending_requests.json"))
-    bot = LaCommuDiscordBot(config, parser, retry_manager)
+    post_history = PostHistory(Path("data/posted_jobs.log"))
+    await post_history.load()
+    bot = LaCommuDiscordBot(config, parser, retry_manager, post_history)
     health_server = HealthServer()
 
     await health_server.start()

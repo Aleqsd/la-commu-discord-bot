@@ -1,11 +1,10 @@
-import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
 
 from bot.client import LaCommuDiscordBot
 from bot.config import BotConfig, ChannelConfig, OpenAIConfig
+from bot.history import PostHistory
 from bot.retry import RetryManager
 
 
@@ -44,7 +43,7 @@ class FakeChannel:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_jobs_posts_to_mapped_channel():
+async def test_dispatch_jobs_posts_to_mapped_channel(tmp_path: Path):
     config = BotConfig(
         discord_token="dummy",
         openai=OpenAIConfig(api_key="dummy"),
@@ -55,41 +54,39 @@ async def test_dispatch_jobs_posts_to_mapped_channel():
         ),
     )
     parser = DummyParser()
-    tmp_dir = tempfile.mkdtemp()
-    manager = RetryManager(Path(tmp_dir) / "pending.json")
-    try:
-        bot = LaCommuDiscordBot(config, parser, manager)
+    manager = RetryManager(tmp_path / "pending.json")
+    post_history = PostHistory(tmp_path / "posted.log")
+    await post_history.load()
+    bot = LaCommuDiscordBot(config, parser, manager, post_history)
 
-        art_channel = FakeChannel("art", 1)
-        guild = FakeGuild([art_channel])
+    art_channel = FakeChannel("art", 1)
+    guild = FakeGuild([art_channel])
 
-        await bot._cache_team_channels(guild)
+    await bot._cache_team_channels(guild)
 
-        jobs_data = [
-            {
-                "job_title": "Environment Artist",
-                "company_name": "Voxel Labs",
-                "job_url": "https://jobs.example.com/env",
-                "team": "art",
-            }
-        ]
+    jobs_data = [
+        {
+            "job_title": "Environment Artist",
+            "company_name": "Voxel Labs",
+            "job_url": "https://jobs.example.com/env",
+            "team": "art",
+        }
+    ]
 
-        posted, issues = await bot._post_jobs(jobs_data, guild)
+    posted, issues = await bot._post_jobs(jobs_data, guild)
 
-        assert len(posted) == 1
-        assert not issues
-        assert len(art_channel.sent_embeds) == 1
-        job, channel = posted[0]
-        assert job.job_title == "Environment Artist"
-        assert channel is art_channel
-        embed = art_channel.sent_embeds[0]
-        assert "Environment Artist" in embed.title
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    assert len(posted) == 1
+    assert not issues
+    assert len(art_channel.sent_embeds) == 1
+    job, channel = posted[0]
+    assert job.job_title == "Environment Artist"
+    assert channel is art_channel
+    embed = art_channel.sent_embeds[0]
+    assert "Environment Artist" in embed.title
 
 
 @pytest.mark.asyncio
-async def test_dispatch_jobs_missing_channel_reports_error():
+async def test_dispatch_jobs_missing_channel_reports_error(tmp_path: Path):
     config = BotConfig(
         discord_token="dummy",
         openai=OpenAIConfig(api_key="dummy"),
@@ -100,27 +97,63 @@ async def test_dispatch_jobs_missing_channel_reports_error():
         ),
     )
     parser = DummyParser()
-    tmp_dir = tempfile.mkdtemp()
-    manager = RetryManager(Path(tmp_dir) / "pending.json")
-    try:
-        bot = LaCommuDiscordBot(config, parser, manager)
+    manager = RetryManager(tmp_path / "pending.json")
+    post_history = PostHistory(tmp_path / "posted.log")
+    await post_history.load()
+    bot = LaCommuDiscordBot(config, parser, manager, post_history)
 
-        guild = FakeGuild([])
+    guild = FakeGuild([])
 
-        await bot._cache_team_channels(guild)
+    await bot._cache_team_channels(guild)
 
-        jobs_data = [
-            {
-                "job_title": "Environment Artist",
-                "company_name": "Voxel Labs",
-                "job_url": "https://jobs.example.com/env",
-                "team": "art",
-            }
-        ]
+    jobs_data = [
+        {
+            "job_title": "Environment Artist",
+            "company_name": "Voxel Labs",
+            "job_url": "https://jobs.example.com/env",
+            "team": "art",
+        }
+    ]
 
-        posted, issues = await bot._post_jobs(jobs_data, guild)
+    posted, issues = await bot._post_jobs(jobs_data, guild)
 
-        assert not posted
-        assert len(issues) == 1
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    assert not posted
+    assert len(issues) == 1
+    
+
+@pytest.mark.asyncio
+async def test_dispatch_jobs_skips_duplicates(tmp_path: Path):
+    config = BotConfig(
+        discord_token="dummy",
+        openai=OpenAIConfig(api_key="dummy"),
+        channels=ChannelConfig(
+            team_channels={
+                "art": 1,
+            },
+        ),
+    )
+    parser = DummyParser()
+    manager = RetryManager(tmp_path / "pending.json")
+    post_history = PostHistory(tmp_path / "posted.log")
+    await post_history.load()
+    bot = LaCommuDiscordBot(config, parser, manager, post_history)
+
+    art_channel = FakeChannel("art", 1)
+    guild = FakeGuild([art_channel])
+    await bot._cache_team_channels(guild)
+
+    job_payload = {
+        "job_title": "Environment Artist",
+        "company_name": "Voxel Labs",
+        "job_url": "https://jobs.example.com/env",
+        "team": "art",
+    }
+
+    posted, issues = await bot._post_jobs([job_payload], guild)
+    assert len(posted) == 1
+    assert not issues
+
+    second_post, second_issues = await bot._post_jobs([job_payload], guild)
+    assert not second_post
+    assert any("Skipped duplicate" in item for item in second_issues)
+    assert len(art_channel.sent_embeds) == 1

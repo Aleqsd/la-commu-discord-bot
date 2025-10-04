@@ -206,6 +206,15 @@ sudo systemctl status job-caster       # see current status
 sudo journalctl -u job-caster -f       # follow logs live (Ctrl-C to quit)
 ```
 
+Inside the repository you can also run:
+
+```bash
+make systemd-restart  # wraps systemctl restart $SYSTEMD_UNIT (default: job-caster)
+make systemd-tail     # tails journalctl for the same unit
+```
+
+Override `SYSTEMD_UNIT`, `SYSTEMCTL`, or `JOURNALCTL` when invoking `make` if your setup differs, e.g. `make SYSTEMD_UNIT=my-bot systemd-restart`.
+
 ### 5. Updating code or dependencies
 
 ```bash

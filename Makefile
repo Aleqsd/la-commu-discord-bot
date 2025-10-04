@@ -2,10 +2,13 @@ IMAGE=la-commu-discord-bot:latest
 REGISTRY=rg.fr-par.scw.cloud/la-commu-discord-bot
 REMOTE_IMAGE=$(REGISTRY)/$(IMAGE)
 CONTAINER_ID=2fed6267-5ce1-4331-80f8-241f411a782e
+SYSTEMD_UNIT?=job-caster
+SYSTEMCTL?=sudo systemctl
+JOURNALCTL?=sudo journalctl
 PYTHON?=python
 export PYTHONPATH:=$(PWD)
 
-.PHONY: help build push redeploy deploy lint test clean
+.PHONY: help build push redeploy deploy lint test clean systemd-restart systemd-tail
 
 help:
 	@echo "Available targets:"
@@ -16,6 +19,8 @@ help:
 	@echo "  make lint        # Syntax check via compileall"
 	@echo "  make test        # Install test deps & run pytest"
 	@echo "  make clean       # Remove build caches"
+	@echo "  make systemd-restart  # Restart the systemd service (uses SYSTEMCTL/SYSTEMD_UNIT)"
+	@echo "  make systemd-tail     # Follow journalctl logs for the service"
 
 build:
 	docker build -t $(IMAGE) .
@@ -38,3 +43,9 @@ test:
 
 clean:
 	rm -rf __pycache__ */__pycache__
+
+systemd-restart:
+	$(SYSTEMCTL) restart $(SYSTEMD_UNIT)
+
+systemd-tail:
+	$(JOURNALCTL) -u $(SYSTEMD_UNIT) -f

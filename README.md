@@ -128,6 +128,20 @@ scw container container deploy 2fed6267-5ce1-4331-80f8-241f411a782e
 
 If you rotate registry credentials, run `docker login rg.fr-par.scw.cloud/la-commu-discord-bot` again before the push.
 
+## Publishing to GitHub Container Registry
+
+1. Generate a GitHub Personal Access Token (classic) with the `write:packages` scope and keep it handy.
+2. Authenticate Docker once:
+   ```bash
+   echo "$GITHUB_PAT" | docker login ghcr.io -u <your-github-username> --password-stdin
+   ```
+3. Push using the Makefile helper (override `GHCR_NAMESPACE` with your username or organisation):
+   ```bash
+   make GHCR_NAMESPACE=<your-github-namespace> ghcr-push
+   ```
+
+The helper tags the local image as `ghcr.io/<namespace>/<IMAGE>` (defaults to `la-commu-discord-bot:latest`) before pushing. Re-run the `docker login` step whenever the token changes or expires.
+
 ## Notes
 
 - Ensure your Discord guild has text channels matching the IDs you provide.
@@ -145,9 +159,9 @@ If you rotate registry credentials, run `docker login rg.fr-par.scw.cloud/la-com
 
 ---
 
-## Running Locally as a Systemd Service (Linux server)
+## Running Locally as a Systemd Service (Ubuntu server)
 
-When running outside of Scaleway (e.g. on your own Debian box), you can keep the bot
+When running outside of Scaleway (e.g. on your own Ubuntu host), you can keep the bot
 alive in the background and view logs easily by using **systemd**.
 
 ### 1. Create a virtualenv (once per machine)
@@ -163,7 +177,7 @@ deactivate
 
 ### 2. Create the systemd unit
 
-Create `/etc/systemd/system/job-caster.service` (requires `sudo`) with:
+Create `/etc/systemd/system/la-commu-discord-bot.service` (requires `sudo`) with:
 
 ```ini
 [Unit]
@@ -172,13 +186,16 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+[Unit]
+Description=Discord Bot La Commu
+After=network.target
+
+[Service]
 Type=simple
-User=freebox                       # change if needed
-Group=freebox
-WorkingDirectory=/home/freebox/la-commu-discord-bot
-Environment="PYTHONUNBUFFERED=1"
-EnvironmentFile=-/home/freebox/la-commu-discord-bot/.env
-ExecStart=/home/freebox/la-commu-discord-bot/.venv/bin/python /home/freebox/la-commu-discord-bot/main.py --log-file /home/freebox/la-commu-discord-bot/logs/jobbot.log
+User=root
+WorkingDirectory=/root/la-commu-discord-bot
+ExecStart=/root/la-commu-discord-bot/.venv/bin/python main.py
+EnvironmentFile=/etc/la-commu-discord-bot.env
 Restart=always
 RestartSec=3
 
@@ -187,29 +204,29 @@ WantedBy=multi-user.target
 ```
 
 > `EnvironmentFile` loads your `.env` secrets (Discord token, OpenAI key, etc.).
-> `--log-file` mirrors console output into `/home/freebox/la-commu-discord-bot/logs/jobbot.log`; change the path if you prefer a different location.
+> `--log-file` mirrors console output into `/la-commu-discord-bot/logs/jobbot.log`; change the path if you prefer a different location.
 
 ### 3. Enable and start the service
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable job-caster       # start at boot
-sudo systemctl start job-caster        # launch immediately
+sudo systemctl enable la-commu-discord-bot       # start at boot
+sudo systemctl start la-commu-discord-bot        # launch immediately
 ```
 
 ### 4. Useful commands
 
 ```bash
-sudo systemctl stop job-caster         # stop the bot
-sudo systemctl restart job-caster      # restart after code/config change
-sudo systemctl status job-caster       # see current status
-sudo journalctl -u job-caster -f       # follow logs live (Ctrl-C to quit)
+sudo systemctl stop la-commu-discord-bot         # stop the bot
+sudo systemctl restart la-commu-discord-bot      # restart after code/config change
+sudo systemctl status la-commu-discord-bot       # see current status
+sudo journalctl -u la-commu-discord-bot -f       # follow logs live (Ctrl-C to quit)
 ```
 
 Inside the repository you can also run:
 
 ```bash
-make systemd-restart  # wraps systemctl restart $SYSTEMD_UNIT (default: job-caster)
+make systemd-restart  # wraps systemctl restart $SYSTEMD_UNIT (default: la-commu-discord-bot)
 make systemd-tail     # tails journalctl for the same unit
 ```
 
@@ -223,7 +240,7 @@ git pull                               # fetch new code
 source .venv/bin/activate
 pip install -r requirements.txt
 deactivate
-sudo systemctl restart job-caster      # apply the changes
+sudo systemctl restart la-commu-discord-bot      # apply the changes
 ```
 
 The service will automatically restart if it crashes or after a reboot,

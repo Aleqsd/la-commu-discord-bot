@@ -2,13 +2,15 @@ IMAGE=la-commu-discord-bot:latest
 REGISTRY=rg.fr-par.scw.cloud/la-commu-discord-bot
 REMOTE_IMAGE=$(REGISTRY)/$(IMAGE)
 CONTAINER_ID=2fed6267-5ce1-4331-80f8-241f411a782e
-SYSTEMD_UNIT?=job-caster
+GHCR_REGISTRY?=ghcr.io
+GHCR_NAMESPACE?=
+SYSTEMD_UNIT?=la-commu-discord-bot
 SYSTEMCTL?=sudo systemctl
 JOURNALCTL?=sudo journalctl
 PYTHON?=python
 export PYTHONPATH:=$(PWD)
 
-.PHONY: help build push redeploy deploy lint test clean systemd-restart systemd-tail tail
+.PHONY: help build push redeploy deploy lint test clean systemd-restart systemd-tail tail ghcr-push
 
 help:
 	@echo "Available targets:"
@@ -22,6 +24,7 @@ help:
 	@echo "  make systemd-restart  # Restart the systemd service (uses SYSTEMCTL/SYSTEMD_UNIT)"
 	@echo "  make systemd-tail     # Follow journalctl logs for the service"
 	@echo "  make tail        # Tail the log file (requires --log-file in ExecStart)"
+	@echo "  make ghcr-push   # Push the image to GitHub Container Registry (set GHCR_NAMESPACE)"
 
 build:
 	docker build -t $(IMAGE) .
@@ -35,10 +38,18 @@ redeploy:
 
 deploy: push redeploy
 
+ghcr-push: build
+	@if [ -z "$(GHCR_NAMESPACE)" ]; then \
+		echo "GHCR_NAMESPACE is empty. Run 'make GHCR_NAMESPACE=your-gh-username ghcr-push'."; \
+		exit 1; \
+	fi
+	docker tag $(IMAGE) $(GHCR_REGISTRY)/$(GHCR_NAMESPACE)/$(IMAGE)
+	docker push $(GHCR_REGISTRY)/$(GHCR_NAMESPACE)/$(IMAGE)
+
 lint:
 	$(PYTHON) -m compileall .
 
-test:
+test tests:
 	$(PYTHON) -m pip install -r requirements-test.txt
 	$(PYTHON) -m pytest
 

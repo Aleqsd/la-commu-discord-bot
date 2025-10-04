@@ -1,6 +1,6 @@
 # la-commu-discord-bot
 
-`la-commu-discord-bot` is a Discord bot packaged for Scaleway Serverless Containers. It exposes slash commands that scrape job links (and referenced images), extract structured data with the OpenAI API, and redistribute formatted embeds to speciality channels (`art`, `game-design`, `dev`, `others`).
+`la-commu-discord-bot` is a Discord bot packaged for Scaleway Serverless Containers. It exposes slash commands that scrape job links (and referenced images), extract structured data with the OpenAI API, and redistribute formatted embeds to speciality channels (`art`, `game-design`, `dev`, `others`). The production instance currently runs on a DigitalOcean Droplet managed via `systemd`.
 
 ## Quick Start
 
@@ -91,6 +91,8 @@ Supported teams by default are `art`, `game_design`, `dev`, and `others`. You ca
 
 ## Scaleway Delivery Model
 
+Although production currently runs on a DigitalOcean Droplet, the project still ships with the Scaleway workflow if you want to deploy there instead.
+
 - Docker image is built locally (`make build`) and pushed to the Scaleway Container Registry (`make push`).
 - Serverless container (Always On) pulls `rg.fr-par.scw.cloud/la-commu-discord-bot/la-commu-discord-bot:latest` and runs the bot.
 - `PORT` exposes a lightweight health server so Scaleway health checks succeed.
@@ -150,6 +152,7 @@ The helper tags the local image as `ghcr.io/<namespace>/<IMAGE>` (defaults to `l
 - Tests mock external services; avoid running them while the bot is logged into production to keep logs clean.
 - Slash-command submissions are persisted; if the bot restarts mid-process they are retried automatically (up to three attempts).
 - A lightweight health server responds on `PORT` (default `8080`) so hosting platforms can probe readiness.
+- UptimeRobot watches the public health check at https://stats.uptimerobot.com/Q2aJxylmN9/801513961 to alert if the Droplet stops responding.
 
 ## Future Enhancements
 

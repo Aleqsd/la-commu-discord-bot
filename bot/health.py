@@ -45,7 +45,8 @@ class HealthServer:
         app.router.add_get("/", self._handle_health)
         app.router.add_get("/health", self._handle_health)
         app.router.add_get("/healthz", self._handle_health)
-        self._runner = web.AppRunner(app)
+        # Disable default aiohttp access logging to keep health probes out of INFO logs.
+        self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self._host, self._port)
         await self._site.start()

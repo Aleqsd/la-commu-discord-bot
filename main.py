@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import os
 from pathlib import Path
+from typing import Sequence
 
 from bot.client import LaCommuDiscordBot
 from bot.config import load_config
@@ -12,8 +14,34 @@ from bot.openai_client import OpenAIJobParser
 from bot.retry import RetryManager
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=LOG_LEVEL, format="[%(asctime)s] %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def configure_logging(log_file: Path | None) -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_file))
+
+    logging.basicConfig(
+        level=LOG_LEVEL,
+        format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Launch LaCommu Discord bot")
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        help="Optional path to a file where logs should also be written.",
+    )
+    return parser.parse_args(argv)
+
+
+configure_logging(None)
 
 
 async def run_bot() -> None:
@@ -33,7 +61,9 @@ async def run_bot() -> None:
         await health_server.stop()
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+    configure_logging(args.log_file)
     asyncio.run(run_bot())
 
 

@@ -9,12 +9,13 @@ from bot.client import LaCommuDiscordBot, resolve_image_job_url, resolve_page_jo
 from bot.config import BotConfig, ChannelConfig, OpenAIConfig
 from bot.history import PostHistory
 from bot.limits import RequestRateLimiter
-from bot.openai_client import OpenAIRequestError
+from bot.openai_client import OpenAIRequestError, OpenAITruncatedError
 from bot.retry import RetryManager
+from bot.scraping import PageContent
 
 
 class DummyParser:
-    async def parse_from_text(self, *, content: str, url: str):  # pragma: no cover - not used here
+    async def parse_from_text(self, *, content: str, url: str, links=()):  # pragma: no cover - not used here
         return []
 
     async def parse_from_image(self, *, image_url: str, url: str):  # pragma: no cover - not used here
@@ -27,18 +28,23 @@ class RecordingParser:
         self.image_jobs = image_jobs or []
         self.error = error
         self.text_calls = []
+        self.text_links = []
         self.image_calls = []
 
-    async def parse_from_text(self, *, content: str, url: str):
+    def _raise_if_failing(self, url):
+        error = self.error.get(url) if isinstance(self.error, dict) else self.error
+        if error:
+            raise error
+
+    async def parse_from_text(self, *, content: str, url: str, links=()):
         self.text_calls.append(url)
-        if self.error:
-            raise self.error
+        self.text_links.append(tuple(links))
+        self._raise_if_failing(url)
         return [dict(job) for job in self.text_jobs]
 
     async def parse_from_image(self, *, image_url: str, url: str):
         self.image_calls.append(image_url)
-        if self.error:
-            raise self.error
+        self._raise_if_failing(image_url)
         return [dict(job) for job in self.image_jobs]
 
 
@@ -70,11 +76,14 @@ class FakeChannel:
 
 
 class FakeResponse:
-    def __init__(self):
+    def __init__(self, defer_error=None):
         self.deferred = False
         self.messages = []
+        self.defer_error = defer_error
 
     async def defer(self, **kwargs):
+        if self.defer_error is not None:
+            raise self.defer_error
         self.deferred = True
 
     async def send_message(self, content=None, **kwargs):
@@ -103,13 +112,13 @@ class FakeUser:
 class FakeInteraction:
     _next_id = 1000
 
-    def __init__(self, guild, *, user_id=42, permissions=None, followup_errors=()):
+    def __init__(self, guild, *, user_id=42, permissions=None, followup_errors=(), defer_error=None):
         FakeInteraction._next_id += 1
         self.id = FakeInteraction._next_id
         self.guild = guild
         self.user = FakeUser(user_id)
         self.permissions = permissions or discord.Permissions(send_messages=True)
-        self.response = FakeResponse()
+        self.response = FakeResponse(defer_error)
         self.followup = FakeFollowup(followup_errors)
 
 
@@ -144,13 +153,19 @@ def command(bot, name):
     return bot.tree.get_command("jobbot").get_command(name)
 
 
+class FetchLog(list):
+    """URLs fetched so far; ``links`` are the anchors every fake page reports."""
+
+    links = ()
+
+
 @pytest.fixture
 def fake_fetch(monkeypatch):
-    fetched = []
+    fetched = FetchLog()
 
     async def fetch(url, *, timeout, max_bytes):
         fetched.append(url)
-        return "page text"
+        return PageContent(text="page text", links=fetched.links)
 
     monkeypatch.setattr(client_module, "fetch_page_text", fetch)
     return fetched
@@ -455,6 +470,23 @@ def test_page_job_url_must_be_https_on_the_same_host(candidate, expected):
 @pytest.mark.parametrize(
     "candidate, expected",
     [
+        # Linked from the page: external job boards are fine.
+        ("https://jobs.lever.co/studio/123", "https://jobs.lever.co/studio/123"),
+        ("https://jobs.lever.co/studio/123#apply", "https://jobs.lever.co/studio/123#apply"),
+        # Not linked from the page, other host.
+        ("https://jobs.lever.co/other/999", "https://studio.example.com/careers"),
+        # Linked, but only over http: still refused.
+        ("http://boards.example.org/job/1", "https://studio.example.com/careers"),
+    ],
+)
+def test_page_job_url_may_point_to_a_page_link(candidate, expected):
+    links = frozenset({"https://jobs.lever.co/studio/123", "http://boards.example.org/job/1"})
+    assert resolve_page_job_url(candidate, "https://studio.example.com/careers", links) == expected
+
+
+@pytest.mark.parametrize(
+    "candidate, expected",
+    [
         ("https://jobs.anywhere.example/apply", "https://jobs.anywhere.example/apply"),
         ("http://jobs.anywhere.example/apply", "https://cdn.example.com/poster.png"),
         ("jobs.anywhere.example/apply", "https://cdn.example.com/poster.png"),
@@ -544,7 +576,7 @@ async def test_summary_embed_stays_within_limits(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_openai_failure_is_reported_and_request_stays_pending(tmp_path: Path):
-    parser = RecordingParser(error=OpenAIRequestError("APITimeoutError"))
+    parser = RecordingParser(error=OpenAIRequestError("APITimeoutError", retryable=True))
     bot, guild = await make_bot(tmp_path, parser)
     interaction = FakeInteraction(guild)
 
@@ -573,7 +605,7 @@ async def test_successful_post_completes_the_request(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_retry_with_openai_failure_is_not_marked_done(tmp_path: Path):
-    parser = RecordingParser(error=OpenAIRequestError("RateLimitError"))
+    parser = RecordingParser(error=OpenAIRequestError("RateLimitError", retryable=True))
     bot, guild = await make_bot(tmp_path, parser)
     bot.get_guild = lambda guild_id: guild
     await bot.retry_manager.start_request(
@@ -585,3 +617,150 @@ async def test_retry_with_openai_failure_is_not_marked_done(tmp_path: Path):
 
     entry = (await bot.retry_manager.list_pending_requests())[0]
     assert await bot._retry_request(entry) is False
+
+
+@pytest.mark.asyncio
+async def test_page_jobs_keep_links_found_on_the_page(tmp_path: Path, fake_fetch):
+    fake_fetch.links = ("https://jobs.lever.co/studio/123",)
+    parser = RecordingParser(
+        text_jobs=[
+            {"job_title": "Artist", "job_url": "https://jobs.lever.co/studio/123"},
+            {"job_title": "Producer", "job_url": "https://jobs.lever.co/elsewhere/1"},
+        ]
+    )
+    bot, _ = await make_bot(tmp_path, parser)
+
+    collected = await bot._collect_jobs(reference="https://studio.example.com/careers")
+
+    assert [job["job_url"] for job in collected.jobs] == [
+        "https://jobs.lever.co/studio/123",
+        "https://studio.example.com/careers",
+    ]
+
+
+# --- Dedupe keys ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reposting_a_single_job_page_is_a_duplicate_even_if_reworded(tmp_path: Path, fake_fetch):
+    parser = RecordingParser(text_jobs=[{"job_title": "Lead Artist", "company_name": "Studio", "team": "art"}])
+    bot, guild = await make_bot(tmp_path, parser)
+    url = "https://studio.example.com/jobs/lead-artist"
+
+    first = await bot._collect_jobs(reference=url)
+    posted, _ = await bot._post_jobs(first.jobs, guild)
+    assert len(posted) == 1
+    assert first.jobs[0]["shared_link"] is False
+
+    parser.text_jobs = [{"job_title": "Lead 2D Artist (M/F)", "company_name": "Studio Inc.", "team": "art"}]
+    second = await bot._collect_jobs(reference=url + "?utm_source=discord")
+    posted, issues = await bot._post_jobs(second.jobs, guild)
+    assert posted == []
+    assert any("Skipped duplicate" in issue for issue in issues)
+
+
+@pytest.mark.asyncio
+async def test_model_cannot_mark_a_job_as_shared(tmp_path: Path, fake_fetch):
+    parser = RecordingParser(text_jobs=[{"job_title": "Lead Artist", "shared_link": True}])
+    bot, _ = await make_bot(tmp_path, parser)
+
+    collected = await bot._collect_jobs(reference="https://studio.example.com/jobs/1")
+
+    assert collected.jobs[0]["shared_link"] is False
+
+
+@pytest.mark.asyncio
+async def test_old_careers_line_does_not_block_jobs_listed_on_it(tmp_path: Path, fake_fetch):
+    careers = "https://studio.example.com/careers"
+    (tmp_path / "posted.log").write_text(careers + "\n", encoding="utf-8")
+    parser = RecordingParser(
+        text_jobs=[
+            {"job_title": "Animator", "company_name": "Studio", "team": "art"},
+            {"job_title": "Rigger", "company_name": "Studio", "team": "art"},
+        ]
+    )
+    bot, guild = await make_bot(tmp_path, parser)
+
+    collected = await bot._collect_jobs(reference=careers)
+    posted, _ = await bot._post_jobs(collected.jobs, guild)
+
+    assert [job.job_title for job, _ in posted] == ["Animator", "Rigger"]
+
+
+# --- OpenAI failure kinds -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_permanent_openai_error_is_reported_and_not_queued(tmp_path: Path):
+    parser = RecordingParser(error=OpenAIRequestError("BadRequestError"))
+    bot, guild = await make_bot(tmp_path, parser)
+    interaction = FakeInteraction(guild)
+
+    await command(bot, "post").callback(interaction, "image: https://cdn.example.com/missing.png")
+
+    details = interaction.followup.sent[0]["embed"].fields[0].value
+    assert "OpenAI request failed (BadRequestError)" in details
+    assert "retried" not in details
+    assert await bot.retry_manager.list_pending_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_truncated_response_posts_nothing_from_that_url_and_is_not_queued(tmp_path: Path, fake_fetch):
+    long_page = "https://studio.example.com/careers"
+    parser = RecordingParser(
+        image_jobs=[{"job_title": "Animator", "team": "art"}],
+        text_jobs=[{"job_title": "Should not appear", "team": "art"}],
+        error={long_page: OpenAITruncatedError("max_output_tokens")},
+    )
+    bot, guild = await make_bot(tmp_path, parser)
+    interaction = FakeInteraction(guild)
+
+    await command(bot, "post").callback(interaction, f"{long_page} image: https://cdn.example.com/poster.png")
+
+    embed = interaction.followup.sent[0]["embed"]
+    assert "Animator" in embed.description
+    assert "Should not appear" not in embed.description
+    notes = embed.fields[-1].value
+    assert f"OpenAI response was truncated (max_output_tokens) for {long_page}" in notes
+    assert "retried" not in notes
+    assert await bot.retry_manager.list_pending_requests() == []
+
+
+# --- Rate limit slot ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_expired_interaction_gives_its_rate_limit_slot_back(tmp_path: Path):
+    parser = RecordingParser(image_jobs=[{"job_title": "Animator", "team": "art"}])
+    bot, guild = await make_bot(tmp_path, parser)
+    bot.rate_limiter = RequestRateLimiter(max_per_hour=1, max_per_day=10, clock=FakeClock())
+    reference = "image: https://cdn.example.com/poster.png"
+
+    expired = FakeInteraction(guild, defer_error=http_error(404, discord.NotFound))
+    await command(bot, "preview").callback(expired, reference)
+    assert parser.image_calls == []
+
+    allowed = FakeInteraction(guild)
+    await command(bot, "preview").callback(allowed, reference)
+    assert allowed.response.messages == []
+    assert parser.image_calls == ["https://cdn.example.com/poster.png"]
+
+    blocked = FakeInteraction(guild)
+    await command(bot, "post").callback(blocked, reference)
+    assert "1 /jobbot requests per hour" in blocked.response.messages[0][0]
+
+
+@pytest.mark.asyncio
+async def test_page_links_reach_the_parser_on_post_and_on_retry(tmp_path: Path, fake_fetch):
+    fake_fetch.links = ("https://jobs.lever.co/studio/1", "https://studio.example.com/about")
+    parser = RecordingParser(text_jobs=[{"job_title": "Animator", "team": "art"}])
+    bot, guild = await make_bot(tmp_path, parser)
+    bot.get_guild = lambda guild_id: guild
+    reference = "https://studio.example.com/careers"
+
+    await command(bot, "post").callback(FakeInteraction(guild), reference)
+    await bot.retry_manager.start_request(request_id=9, guild_id=guild.id, user_id=5, reference=reference)
+    entry = (await bot.retry_manager.list_pending_requests())[0]
+    await bot._retry_request(entry)
+
+    assert parser.text_links == [fake_fetch.links, fake_fetch.links]

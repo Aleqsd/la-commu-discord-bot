@@ -5,8 +5,8 @@ import logging
 import math
 from collections import Counter
 from datetime import timedelta
-from typing import Dict, List, NamedTuple, Optional
-from urllib.parse import urlsplit
+from typing import AbstractSet, Dict, List, NamedTuple, Optional
+from urllib.parse import urldefrag, urlsplit
 
 import discord
 from discord import app_commands
@@ -24,8 +24,14 @@ from .formatter import (
 )
 from .models import JobPosting
 from .history import PostHistory, normalize_url
-from .limits import MAX_URLS_PER_REQUEST, RequestRateLimiter, is_trusted, max_urls_for
-from .openai_client import OpenAIJobParser, OpenAIRequestError
+from .limits import (
+    MAX_URLS_PER_REQUEST,
+    RateLimitDecision,
+    RequestRateLimiter,
+    is_trusted,
+    max_urls_for,
+)
+from .openai_client import OpenAIJobParser, OpenAIRequestError, OpenAITruncatedError
 from .retry import PendingRequest, RetryManager
 from .scraping import fetch_page_text
 from .utils import extract_image_urls, extract_urls, sanitize_team
@@ -41,7 +47,8 @@ RETRY_QUEUED_NOTE = (
 class JobCollection(NamedTuple):
     jobs: List[Dict[str, object]]
     issues: List[str]
-    openai_failed: bool = False
+    # A transient OpenAI failure happened: the request should stay queued for a retry.
+    retryable_failure: bool = False
 
 
 def _https_url(candidate: object) -> Optional[str]:
@@ -63,12 +70,21 @@ def _https_url(candidate: object) -> Optional[str]:
     return value
 
 
-def resolve_page_job_url(candidate: object, source_url: str) -> str:
-    """Keep the model's link only if it is https on the page's host (or a subdomain of it)."""
+def resolve_page_job_url(
+    candidate: object,
+    source_url: str,
+    page_links: AbstractSet[str] = frozenset(),
+) -> str:
+    """Keep the model's link only if it is https and either links from the page itself
+    (e.g. an external job board) or sits on the page's host (or a subdomain of it)."""
     url = _https_url(candidate)
+    if not url:
+        return source_url
+    if urldefrag(url).url in page_links:
+        return url
     source_host = (urlsplit(source_url).hostname or "").lower()
     base_host = source_host[4:] if source_host.startswith("www.") else source_host
-    if url and base_host:
+    if base_host:
         host = (urlsplit(url).hostname or "").lower()
         if host in (source_host, base_host) or host.endswith("." + base_host):
             return url
@@ -80,16 +96,16 @@ def resolve_image_job_url(candidate: object, source_ref: str) -> str:
     return _https_url(candidate) or source_ref
 
 
-def _share_source_for_common_urls(items: List[Dict[str, object]]) -> None:
-    """Jobs from one source that share a link (e.g. a common careers page) are keyed per title.
+def _mark_shared_job_urls(items: List[Dict[str, object]]) -> None:
+    """Flag jobs from one source that share a link (the page, the poster, a common apply page).
 
-    Setting their source to that shared link makes the duplicate key fall back to
-    link + company + title, so the second and third offers are not mistaken for duplicates.
+    Their duplicate key becomes link + company + title, so the second and third offers are
+    not mistaken for duplicates; every other job is keyed by its link alone. The flag is
+    always overwritten so the model cannot set it.
     """
     counts = Counter(normalize_url(str(item.get("job_url") or "")) for item in items)
     for item in items:
-        if counts[normalize_url(str(item.get("job_url") or ""))] > 1:
-            item["source_url"] = item.get("job_url")
+        item["shared_link"] = counts[normalize_url(str(item.get("job_url") or ""))] > 1
 
 
 class LaCommuDiscordBot(commands.Bot):
@@ -176,15 +192,10 @@ class LaCommuDiscordBot(commands.Bot):
                 return
 
             trusted = self._is_trusted(interaction)
-            if await self._reject_if_rate_limited(interaction, trusted=trusted):
+            if not await self._start_limited_request(interaction, trusted=trusted, command="post"):
                 return
             max_urls = max_urls_for(trusted)
 
-            try:
-                await interaction.response.defer(thinking=True, ephemeral=True)
-            except discord.NotFound:
-                logger.warning("⚠️ Interaction expired before defer in jobbot_post")
-                return
             await self.retry_manager.start_request(
                 request_id=interaction.id,
                 guild_id=guild.id,
@@ -205,7 +216,7 @@ class LaCommuDiscordBot(commands.Bot):
                     max_urls=max_urls,
                 )
                 jobs_data, issues = collected.jobs, collected.issues
-                if collected.openai_failed:
+                if collected.retryable_failure:
                     issues.append(RETRY_QUEUED_NOTE)
 
                 if not jobs_data:
@@ -217,7 +228,7 @@ class LaCommuDiscordBot(commands.Bot):
                         details="\n".join(issues) if issues else "Inspect the provided reference and try again.",
                     )
                     await self._safe_followup(interaction, embed=embed, ephemeral=True)
-                    await self._finish_request(interaction.id, openai_failed=collected.openai_failed)
+                    await self._finish_request(interaction.id, retryable_failure=collected.retryable_failure)
                     return
 
                 posted_jobs, dispatch_issues = await self._post_jobs(jobs_data, guild)
@@ -231,7 +242,7 @@ class LaCommuDiscordBot(commands.Bot):
 
                 embed = self._build_post_summary_embed(posted_jobs, issues)
                 await self._safe_followup(interaction, embed=embed, ephemeral=True)
-                await self._finish_request(interaction.id, openai_failed=collected.openai_failed)
+                await self._finish_request(interaction.id, retryable_failure=collected.retryable_failure)
             except Exception as exc:  # noqa: BLE001
                 await self.retry_manager.fail_request(interaction.id, repr(exc))
                 raise
@@ -253,14 +264,9 @@ class LaCommuDiscordBot(commands.Bot):
                 return
 
             trusted = self._is_trusted(interaction)
-            if await self._reject_if_rate_limited(interaction, trusted=trusted):
+            if not await self._start_limited_request(interaction, trusted=trusted, command="preview"):
                 return
 
-            try:
-                await interaction.response.defer(thinking=True, ephemeral=True)
-            except discord.NotFound:
-                logger.warning("⚠️ Interaction expired before defer in jobbot_preview")
-                return
             request_summary = reference.strip().splitlines()[0][:200]
             logger.info(
                 "🎯 jobbot preview by %s (interaction %s): %s",
@@ -567,18 +573,37 @@ class LaCommuDiscordBot(commands.Bot):
             self.config.trusted_user_ids,
         )
 
-    async def _reject_if_rate_limited(
+    async def _start_limited_request(
         self,
         interaction: discord.Interaction,
         *,
         trusted: bool,
+        command: str,
     ) -> bool:
-        """Count the request against the user's limits; reply and return True when over them."""
-        if trusted:
+        """Apply the rate limit, then defer. Returns False when the command must stop.
+
+        The slot taken from the limiter is given back if the interaction expired before defer.
+        """
+        decision = None
+        if not trusted:
+            decision = self.rate_limiter.acquire(interaction.user.id)
+            if not decision.allowed:
+                await self._send_rate_limit_notice(interaction, decision)
+                return False
+        try:
+            await interaction.response.defer(thinking=True, ephemeral=True)
+        except discord.NotFound:
+            logger.warning("⚠️ Interaction expired before defer in jobbot_%s", command)
+            if decision is not None:
+                self.rate_limiter.release(interaction.user.id, decision)
             return False
-        decision = self.rate_limiter.acquire(interaction.user.id)
-        if decision.allowed:
-            return False
+        return True
+
+    async def _send_rate_limit_notice(
+        self,
+        interaction: discord.Interaction,
+        decision: RateLimitDecision,
+    ) -> None:
         retry_at = discord.utils.utcnow() + timedelta(seconds=math.ceil(decision.retry_after))
         logger.info(
             "⏳ Rate limited %s (%s/%s), retry in %.0fs",
@@ -596,11 +621,10 @@ class LaCommuDiscordBot(commands.Bot):
             await interaction.response.send_message(message, ephemeral=True)
         except discord.HTTPException as exc:
             logger.warning("⚠️ Could not send rate-limit notice: %s", exc)
-        return True
 
-    async def _finish_request(self, request_id: int, *, openai_failed: bool) -> None:
-        """An OpenAI failure keeps the request pending so it is retried on the next start."""
-        if openai_failed:
+    async def _finish_request(self, request_id: int, *, retryable_failure: bool) -> None:
+        """A transient OpenAI failure keeps the request pending so it is retried on the next start."""
+        if retryable_failure:
             await self.retry_manager.fail_request(request_id, "OpenAI request failed")
         else:
             await self.retry_manager.complete_request(request_id)
@@ -699,28 +723,30 @@ class LaCommuDiscordBot(commands.Bot):
             len(posted_jobs),
             len(issues),
         )
-        # Stay pending when OpenAI failed for part of the request; history skips jobs already posted.
-        return not collected.openai_failed
+        # Stay pending after a transient OpenAI failure; history skips jobs already posted.
+        return not collected.retryable_failure
 
     async def _parse_page_jobs(self, url: str) -> tuple[List[Dict[str, object]], Optional[str]]:
         """Raises OpenAIRequestError when the OpenAI call itself fails."""
         logger.info("🌐 Parsing job page: %s", url)
-        content = await fetch_page_text(
+        page = await fetch_page_text(
             url,
             timeout=self.config.request_timeout,
             max_bytes=self.config.max_scrape_bytes,
         )
-        if not content:
+        if not page:
             return [], f"Couldn't fetch content from {url}"
 
-        jobs_data = await self.parser.parse_from_text(content=content, url=url)
+        # The retry-on-restart path re-fetches the page, so it gets fresh links too.
+        jobs_data = await self.parser.parse_from_text(content=page.text, url=url, links=page.links)
         if not jobs_data:
             return [], f"Couldn't parse job details from {url}"
 
+        page_links = frozenset(page.links)
         for item in jobs_data:
-            item["job_url"] = resolve_page_job_url(item.get("job_url"), url)
+            item["job_url"] = resolve_page_job_url(item.get("job_url"), url, page_links)
             item["source_url"] = url
-        _share_source_for_common_urls(jobs_data)
+        _mark_shared_job_urls(jobs_data)
         logger.info("📦 Parsed %d job(s) from %s", len(jobs_data), url)
         return jobs_data, None
 
@@ -740,7 +766,7 @@ class LaCommuDiscordBot(commands.Bot):
         for item in jobs_data:
             item["job_url"] = resolve_image_job_url(item.get("job_url"), url)
             item["source_url"] = url
-        _share_source_for_common_urls(jobs_data)
+        _mark_shared_job_urls(jobs_data)
         logger.info("📦 Parsed %d job(s) from image %s", len(jobs_data), url)
         return jobs_data, None
 
@@ -752,7 +778,7 @@ class LaCommuDiscordBot(commands.Bot):
     ) -> JobCollection:
         jobs: List[Dict[str, object]] = []
         issues: List[str] = []
-        openai_failed = False
+        retryable_failure = False
 
         text = reference.strip()
         image_urls = extract_image_urls(text)
@@ -771,8 +797,13 @@ class LaCommuDiscordBot(commands.Bot):
         for url, parse in sources:
             try:
                 parsed, error = await parse(url)
+            except OpenAITruncatedError as exc:
+                issues.append(
+                    f"OpenAI response was truncated ({exc.error_type}) for {url}; nothing was posted from it."
+                )
+                continue
             except OpenAIRequestError as exc:
-                openai_failed = True
+                retryable_failure = retryable_failure or exc.retryable
                 issues.append(f"OpenAI request failed ({exc.error_type}) for {url}")
                 continue
             if error:
@@ -783,4 +814,4 @@ class LaCommuDiscordBot(commands.Bot):
         if not page_urls and not image_urls:
             issues.append("No URLs detected in reference text.")
 
-        return JobCollection(jobs, issues, openai_failed)
+        return JobCollection(jobs, issues, retryable_failure)

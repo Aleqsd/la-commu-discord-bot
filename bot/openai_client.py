@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, Dict, Iterable, List
+from urllib.parse import urlsplit
 
+import openai
 from openai import OpenAI
 
 from .config import OpenAIConfig
@@ -35,6 +37,16 @@ IMAGE_PROMPT_TEMPLATE = (
 )
 
 MAX_PROMPT_CHARS = 30000
+# Links appended after the page text so the model can copy each posting's exact URL.
+MAX_PROMPT_LINKS = 60
+MAX_LINK_CHARS = 200
+MAX_LINKS_SECTION_CHARS = 6000
+JOB_LINK_HINTS = ("job", "career", "position", "apply", "opening", "vacanc")
+LINKS_SECTION_HEADER = (
+    "\nLinks found on the page. For each job, set job_url to the exact link from this list "
+    "that points to that specific posting; omit job_url if none does.\n"
+)
+MAX_OUTPUT_TOKENS = 16000
 DEFAULT_TIMEOUT = 60.0
 
 JOB_KEYS = frozenset(
@@ -58,11 +70,32 @@ JOB_KEYS = frozenset(
 
 
 class OpenAIRequestError(RuntimeError):
-    """The OpenAI call itself failed (network, timeout, API error), as opposed to unparseable output."""
+    """The OpenAI call itself failed, as opposed to returning output that could not be parsed.
 
-    def __init__(self, error_type: str, message: str = "") -> None:
+    ``retryable`` is True only for transient failures (connection, timeout, rate limit, 5xx):
+    those keep the /jobbot request queued. Anything else (4xx such as a bad image URL)
+    is a per-URL failure.
+    """
+
+    def __init__(self, error_type: str, message: str = "", *, retryable: bool = False) -> None:
         super().__init__(message or error_type)
         self.error_type = error_type
+        self.retryable = retryable
+
+
+class OpenAITruncatedError(OpenAIRequestError):
+    """The response stopped early (status "incomplete"): its JSON must not be used."""
+
+
+# Response.error codes worth retrying when status is "failed".
+RETRYABLE_RESPONSE_ERROR_CODES = frozenset({"server_error", "rate_limit_exceeded"})
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    # APITimeoutError is a subclass of APIConnectionError.
+    if isinstance(exc, (openai.APIConnectionError, openai.RateLimitError, openai.InternalServerError)):
+        return True
+    return isinstance(exc, openai.APIStatusError) and exc.status_code >= 500
 
 
 class OpenAIJobParser:
@@ -72,10 +105,17 @@ class OpenAIJobParser:
         self._image_model = config.image_model or config.model
         self._config = config
 
-    async def parse_from_text(self, *, content: str, url: str) -> List[Dict[str, Any]]:
+    async def parse_from_text(
+        self,
+        *,
+        content: str,
+        url: str,
+        links: Iterable[str] = (),
+    ) -> List[Dict[str, Any]]:
         if not content:
             return []
         prompt = TEXT_PROMPT_TEMPLATE.format(url=url, content=content[:MAX_PROMPT_CHARS])
+        prompt += build_links_section(links, url)
         messages = _build_text_messages(prompt)
         raw_text = await self._call_openai(messages, model=self._text_model)
         return _extract_jobs(raw_text)
@@ -93,8 +133,9 @@ class OpenAIJobParser:
         request: Dict[str, Any] = {
             "model": model,
             "input": list(messages),
-            # Reasoning models spend part of this budget before writing the JSON.
-            "max_output_tokens": 4000,
+            # Reasoning models spend part of this budget before writing the JSON; long
+            # career pages need room for many jobs.
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
             "text": {"format": {"type": "json_object"}},
         }
         if self._config.temperature is not None:
@@ -107,23 +148,82 @@ class OpenAIJobParser:
             response = await run_blocking(_send_request)
         except Exception as exc:  # noqa: BLE001
             error_type = type(exc).__name__
-            logger.error("🚫 OpenAI request failed (%s): %s", error_type, exc)
-            raise OpenAIRequestError(error_type, str(exc)) from exc
+            retryable = _is_retryable(exc)
+            logger.error("🚫 OpenAI request failed (%s, retryable=%s): %s", error_type, retryable, exc)
+            raise OpenAIRequestError(error_type, str(exc), retryable=retryable) from exc
 
         status = getattr(response, "status", None)
         if status == "incomplete":
-            logger.warning(
-                "⚠️ OpenAI response incomplete: %s",
-                getattr(response, "incomplete_details", None),
-            )
-        elif status in {"failed", "cancelled"}:
+            details = getattr(response, "incomplete_details", None)
+            reason = getattr(details, "reason", None) or "incomplete"
+            logger.warning("⚠️ OpenAI response incomplete, discarding it: %s", details)
+            raise OpenAITruncatedError(str(reason), f"OpenAI response incomplete: {details}")
+        if status in {"failed", "cancelled"}:
             error = getattr(response, "error", None)
+            code = getattr(error, "code", None)
             logger.error("🚫 OpenAI response %s: %s", status, error)
-            raise OpenAIRequestError(f"Response{status.capitalize()}", str(error or status))
+            raise OpenAIRequestError(
+                f"Response{status.capitalize()}",
+                str(error or status),
+                retryable=code in RETRYABLE_RESPONSE_ERROR_CODES,
+            )
 
         raw_text = getattr(response, "output_text", "") or ""
         logger.info("🤖 OpenAI responded with %s characters", len(raw_text))
         return raw_text
+
+
+def _site_host(url: str) -> str:
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def _looks_like_job_link(link: str, source_host: str) -> bool:
+    if _site_host(link) != source_host:
+        return True
+    path = urlsplit(link).path.lower()
+    return any(hint in path for hint in JOB_LINK_HINTS)
+
+
+def build_links_section(links: Iterable[str], source_url: str) -> str:
+    """List the page's links for the model, job-looking ones first; "" when there are none.
+
+    Keeps http(s) links of at most MAX_LINK_CHARS (longer ones are skipped rather than cut,
+    since a cut URL is useless), deduplicated, at most MAX_PROMPT_LINKS of them and
+    MAX_LINKS_SECTION_CHARS in total. Job-looking links (another host than the source, or a
+    path mentioning jobs/careers/...) come first; the rest fill up in page order.
+    """
+    source_host = _site_host(source_url)
+    candidates: List[str] = []
+    seen = set()
+    for link in links:
+        if not isinstance(link, str):
+            continue
+        link = link.strip()
+        if not link or link in seen or len(link) > MAX_LINK_CHARS:
+            continue
+        if not link.lower().startswith(("http://", "https://")) or not _site_host(link):
+            continue
+        seen.add(link)
+        candidates.append(link)
+
+    preferred = [link for link in candidates if _looks_like_job_link(link, source_host)]
+    others = [link for link in candidates if not _looks_like_job_link(link, source_host)]
+
+    lines: List[str] = []
+    size = len(LINKS_SECTION_HEADER)
+    for link in preferred + others:
+        line = f"- {link}\n"
+        if len(lines) >= MAX_PROMPT_LINKS or size + len(line) > MAX_LINKS_SECTION_CHARS:
+            break
+        lines.append(line)
+        size += len(line)
+    if not lines:
+        return ""
+    return LINKS_SECTION_HEADER + "".join(lines)
 
 
 def _build_text_messages(prompt: str) -> List[Dict[str, Any]]:
@@ -170,16 +270,43 @@ def _jobs_from_payload(data: Any) -> Any:
     return _NOT_JOBS
 
 
+def _top_level_starts(text: str) -> Iterable[int]:
+    """Yield the index of every '[' or '{' that is not nested inside another bracket.
+
+    Nesting follows JSON strings (with escapes) inside brackets; quotes in surrounding
+    prose are ignored. A structure that is opened but never closed (cut-off output) keeps
+    everything after it nested, so its inner objects are never offered as candidates.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char in "[{":
+            if depth == 0:
+                yield index
+            depth += 1
+        elif char in "]}":
+            depth = max(depth - 1, 0)
+        elif char == '"' and depth > 0:
+            in_string = True
+
+
 def _decode_candidates(text: str) -> Iterable[Any]:
-    """Yield JSON values found in ``text``: the whole text first, then from each '[' or '{'."""
+    """Yield the JSON values in ``text``: the whole text, else each top-level structure."""
     try:
         yield json.loads(text)
+        return
     except json.JSONDecodeError:
         pass
     decoder = json.JSONDecoder()
-    for index, char in enumerate(text):
-        if char not in "[{":
-            continue
+    for index in _top_level_starts(text):
         try:
             value, _ = decoder.raw_decode(text, index)
         except json.JSONDecodeError:

@@ -5,7 +5,9 @@ import contextlib
 import ipaddress
 import logging
 import socket
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+from urllib.parse import urldefrag, urljoin
 
 import httpx
 from bs4 import BeautifulSoup
@@ -35,10 +37,29 @@ class UnsafeURLError(FetchError):
     """Raised when a URL uses a disallowed scheme or points to a non-public address."""
 
 
+@dataclass(frozen=True, slots=True)
+class PageContent:
+    text: str
+    # Absolute http(s) targets of the page's <a href> links, without fragments,
+    # deduplicated in page order.
+    links: Tuple[str, ...] = field(default_factory=tuple)
+
+
 async def _resolve_host(host: str, port: int) -> List[str]:
     loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     return [info[4][0] for info in infos]
+
+
+def _ensure_global_address(address: str, host: str) -> None:
+    try:
+        ip = ipaddress.ip_address(str(address).split("%", 1)[0])
+    except ValueError as exc:
+        raise UnsafeURLError(f"host '{host}' uses unexpected address {address!r}") from exc
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if not ip.is_global:
+        raise UnsafeURLError(f"host '{host}' resolves to non-public address {ip}")
 
 
 async def ensure_public_url(url: httpx.URL) -> None:
@@ -56,28 +77,41 @@ async def ensure_public_url(url: httpx.URL) -> None:
     if not addresses:
         raise UnsafeURLError(f"host '{host}' did not resolve to any address")
     for address in addresses:
-        try:
-            ip = ipaddress.ip_address(address.split("%", 1)[0])
-        except ValueError as exc:
-            raise UnsafeURLError(f"host '{host}' resolved to unexpected address {address!r}") from exc
-        if ip.version == 6 and ip.ipv4_mapped is not None:
-            ip = ip.ipv4_mapped
-        if not ip.is_global:
-            raise UnsafeURLError(f"host '{host}' resolves to non-public address {ip}")
+        _ensure_global_address(address, host)
+
+
+def ensure_public_peer(response: httpx.Response) -> None:
+    """Check the address httpx actually connected to (DNS may have changed since the lookup).
+
+    httpcore exposes it as ``network_stream.get_extra_info("server_addr")``, a (host, port, ...)
+    tuple. A missing address is refused as well.
+    """
+    host = response.request.url.host
+    stream = response.extensions.get("network_stream")
+    server_addr = stream.get_extra_info("server_addr") if stream is not None else None
+    if not server_addr:
+        raise UnsafeURLError(f"could not verify the address connected to for '{host}'")
+    address = server_addr[0] if isinstance(server_addr, (tuple, list)) else server_addr
+    _ensure_global_address(address, host)
 
 
 def _media_type(content_type: Optional[str]) -> str:
     return (content_type or "").split(";", 1)[0].strip().lower()
 
 
-async def _download_page(url: str, *, timeout: float, max_bytes: int) -> Tuple[bytes, str, str]:
-    """Fetch ``url`` following at most MAX_REDIRECTS redirects, validating every hop."""
+async def _download_page(url: str, *, timeout: float, max_bytes: int) -> Tuple[bytes, str, str, str]:
+    """Fetch ``url`` following at most MAX_REDIRECTS redirects, validating every hop.
+
+    Returns the body, media type, charset and final URL.
+    """
     current = httpx.URL(url)
     headers = {"User-Agent": USER_AGENT}
     async with httpx.AsyncClient(follow_redirects=False, timeout=timeout, headers=headers) as client:
         for _ in range(MAX_REDIRECTS + 1):
             await ensure_public_url(current)
             async with client.stream("GET", current) as response:
+                # Raising here leaves the block, which closes the stream unread.
+                ensure_public_peer(response)
                 if response.is_redirect:
                     current = current.join(response.headers["location"])
                     logger.info("↪️ Redirected to %s", current)
@@ -99,19 +133,33 @@ async def _download_page(url: str, *, timeout: float, max_bytes: int) -> Tuple[b
                             del body[max_bytes:]
                             logger.info("✂️ Stopped reading %s at %s bytes", url, max_bytes)
                             break
-                return bytes(body), media_type, response.charset_encoding or "utf-8"
+                return bytes(body), media_type, response.charset_encoding or "utf-8", str(current)
     raise FetchError(f"more than {MAX_REDIRECTS} redirects")
 
 
 def _decode(body: bytes, encoding: str) -> str:
     try:
         return body.decode(encoding, errors="replace")
-    except LookupError:
+    except (LookupError, UnicodeError):
+        # Unknown charsets, and codecs such as "idna" that reject errors="replace".
         return body.decode("utf-8", errors="replace")
 
 
-def _extract_text(body: bytes, media_type: str, encoding: str) -> str:
+def _absolute_link(href: object, base_url: str) -> Optional[str]:
+    if not isinstance(href, str) or not href.strip():
+        return None
+    try:
+        absolute = urldefrag(urljoin(base_url, href.strip())).url
+    except ValueError:
+        return None
+    if not absolute.lower().startswith(("http://", "https://")):
+        return None
+    return absolute
+
+
+def _extract_page(body: bytes, media_type: str, encoding: str, base_url: str) -> PageContent:
     markup = _decode(body, encoding)
+    links: Tuple[str, ...] = ()
     if media_type == "text/plain":
         text = markup
     else:
@@ -121,14 +169,17 @@ def _extract_text(body: bytes, media_type: str, encoding: str) -> str:
         for tag in soup(CHROME_TAGS):
             if not tag.decomposed and tag.find_parent(CONTENT_CONTAINERS) is None:
                 tag.decompose()
+        resolved = (_absolute_link(anchor.get("href"), base_url) for anchor in soup.find_all("a"))
+        links = tuple(dict.fromkeys(link for link in resolved if link))
         text = soup.get_text(separator="\n")
-    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    return PageContent(text=cleaned, links=links)
 
 
-async def fetch_page_text(url: str, *, timeout: float, max_bytes: int) -> Optional[str]:
+async def fetch_page_text(url: str, *, timeout: float, max_bytes: int) -> Optional[PageContent]:
     logger.info("🕸️ Fetching page: %s", url)
     try:
-        body, media_type, encoding = await asyncio.wait_for(
+        body, media_type, encoding, final_url = await asyncio.wait_for(
             _download_page(url, timeout=timeout, max_bytes=max_bytes),
             timeout=timeout,
         )
@@ -142,28 +193,9 @@ async def fetch_page_text(url: str, *, timeout: float, max_bytes: int) -> Option
         logger.warning("⚠️ Failed to fetch %s: %s", url, exc)
         return None
 
-    cleaned = await run_blocking(_extract_text, body, media_type, encoding)
-    if not cleaned:
+    page = await run_blocking(_extract_page, body, media_type, encoding, final_url)
+    if not page.text:
         logger.warning("⚠️ Empty text after parsing %s", url)
         return None
-    logger.info("✅ Extracted text from %s", url)
-    return cleaned
-
-
-async def fetch_image_bytes(url: str, *, timeout: float, max_bytes: int) -> Optional[bytes]:
-    logger.info("🖼️ Fetching image: %s", url)
-    headers = {"User-Agent": USER_AGENT}
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout, headers=headers) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("⚠️ Failed to fetch image %s: %s", url, exc)
-        return None
-
-    content = response.content
-    if len(content) > max_bytes:
-        logger.warning("⚠️ Image %s is larger than %s bytes", url, max_bytes)
-        return None
-    logger.info("✅ Retrieved image bytes for %s", url)
-    return content
+    logger.info("✅ Extracted text and %d link(s) from %s", len(page.links), url)
+    return page

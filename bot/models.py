@@ -73,8 +73,11 @@ class JobPosting:
     description_summary: Optional[str] = None
     skills: List[str] = field(default_factory=list)
     known_titles: List[str] = field(default_factory=list)
-    # URL or image reference the job was extracted from (used for duplicate detection).
+    # URL or image reference the job was extracted from.
     source_url: Optional[str] = None
+    # Set by the bot (never by the model) when several jobs from one source share job_url:
+    # the duplicate key then adds company + title to that URL.
+    shared_link: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "JobPosting":
@@ -98,4 +101,5 @@ class JobPosting:
             skills=_ensure_list(data.get("skills")),
             known_titles=_ensure_list(data.get("known_titles") or data.get("portfolio_titles")),
             source_url=source_url,
+            shared_link=data.get("shared_link") is True,
         )

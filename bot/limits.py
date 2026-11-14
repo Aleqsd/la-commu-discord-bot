@@ -38,6 +38,8 @@ class RateLimitDecision:
     retry_after: float = 0.0
     window: Optional[str] = None
     limit: Optional[int] = None
+    # Time recorded for an allowed request (None when nothing was recorded).
+    stamp: Optional[float] = None
 
 
 class RequestRateLimiter:
@@ -93,4 +95,14 @@ class RequestRateLimiter:
             return blocked
 
         history.append(now)
-        return RateLimitDecision(allowed=True)
+        return RateLimitDecision(allowed=True, stamp=now)
+
+    def release(self, user_id: int, decision: RateLimitDecision) -> None:
+        """Give back the slot recorded by ``decision`` (the request never ran)."""
+        history = self._history.get(user_id)
+        if decision.stamp is None or not history:
+            return
+        try:
+            history.remove(decision.stamp)
+        except ValueError:
+            pass

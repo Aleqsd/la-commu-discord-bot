@@ -6,13 +6,21 @@ from bot.history import PostHistory, build_job_key, build_legacy_key, normalize_
 from bot.models import JobPosting
 
 
-def _job(title="Environment Artist", company="Voxel Labs", job_url="", source_url=None, team="art"):
+def _job(
+    title="Environment Artist",
+    company="Voxel Labs",
+    job_url="",
+    source_url=None,
+    team="art",
+    shared_link=False,
+):
     return JobPosting(
         job_title=title,
         company_name=company,
         job_url=job_url,
         team=team,
         source_url=source_url,
+        shared_link=shared_link,
     )
 
 
@@ -43,24 +51,32 @@ def test_linkedin_style_variants_share_a_key():
     assert build_job_key(a) == build_job_key(b) == "https://linkedin.com/jobs/view/123"
 
 
-def test_key_uses_job_url_when_it_differs_from_source():
+def test_key_is_the_job_url_alone():
     job = _job(job_url="https://studio.com/jobs/7", source_url="https://studio.com/careers")
     assert build_job_key(job) == "https://studio.com/jobs/7"
 
 
-def test_key_uses_source_company_and_title_when_job_has_no_own_url():
+def test_single_job_page_is_keyed_by_url_alone():
+    # The only job on a page falls back to the page URL: still keyed by that URL alone.
+    job = _job(job_url="https://studio.com/careers/lead", source_url="https://studio.com/careers/lead")
+    assert build_job_key(job) == "https://studio.com/careers/lead"
+
+
+def test_shared_link_jobs_add_company_and_title():
     job = _job(
         title="  Senior   3D Artist ",
         company="Voxel LABS",
         job_url="https://www.studio.com/careers/?utm_source=discord",
         source_url="https://studio.com/careers",
+        shared_link=True,
     )
     assert build_job_key(job) == "https://studio.com/careers|voxel labs|senior 3d artist"
 
 
-def test_legacy_key_matches_original_algorithm():
+def test_legacy_key_only_for_url_keyed_jobs():
     assert build_legacy_key(_job(job_url="https://Jobs.Example.com/Env/#apply")) == "https://jobs.example.com/env"
-    assert build_legacy_key(_job(job_url="")) == "voxel labs|environment artist|art"
+    assert build_legacy_key(_job(job_url="https://studio.com/careers", shared_link=True)) == ""
+    assert build_legacy_key(_job(job_url="")) == ""
 
 
 @pytest.mark.asyncio
@@ -68,7 +84,7 @@ async def test_three_jobs_from_one_image_are_not_duplicates(tmp_path: Path):
     history = PostHistory(tmp_path / "posted.log")
     image = "https://cdn.example.com/poster.png"
     jobs = [
-        _job(title=title, company="Pixel Forge", job_url=image, source_url=image)
+        _job(title=title, company="Pixel Forge", job_url=image, source_url=image, shared_link=True)
         for title in ("Concept Artist", "Gameplay Programmer", "Level Designer")
     ]
 
@@ -90,16 +106,37 @@ async def test_three_jobs_from_one_image_are_not_duplicates(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_legacy_history_lines_still_block_duplicates(tmp_path: Path):
     storage = tmp_path / "posted.log"
-    # Lines written by the previous algorithm (lowercased URL, no fragment, no trailing slash).
-    storage.write_text(
-        "https://jobs.example.com/env\nvoxel labs|tools programmer|dev\n",
-        encoding="utf-8",
-    )
+    # Line written by the previous algorithm (lowercased URL, no fragment, no trailing slash).
+    storage.write_text("https://jobs.example.com/env\n", encoding="utf-8")
     history = PostHistory(storage)
 
     assert await history.is_posted(_job(job_url="https://JOBS.example.com/env/#apply"))
-    assert await history.is_posted(_job(title="Tools Programmer", job_url="", team="dev"))
     assert not await history.is_posted(_job(job_url="https://jobs.example.com/other"))
+
+
+@pytest.mark.asyncio
+async def test_legacy_line_does_not_block_shared_link_jobs(tmp_path: Path):
+    storage = tmp_path / "posted.log"
+    # The old bot recorded the careers page itself when it posted its first job.
+    storage.write_text("https://studio.example.com/careers\n", encoding="utf-8")
+    history = PostHistory(storage)
+    careers = "https://studio.example.com/careers"
+
+    for title in ("Animator", "Rigger"):
+        assert not await history.is_posted(
+            _job(title=title, job_url=careers, source_url=careers, shared_link=True)
+        )
+    assert await history.is_posted(_job(job_url=careers, source_url=careers))
+
+
+@pytest.mark.asyncio
+async def test_reposting_a_single_job_url_is_caught_despite_new_wording(tmp_path: Path):
+    history = PostHistory(tmp_path / "posted.log")
+    url = "https://studio.example.com/jobs/lead-artist"
+    await history.mark_posted(_job(title="Lead Artist", company="Studio", job_url=url, source_url=url))
+
+    reworded = _job(title="Lead 2D Artist (M/F)", company="Studio Inc.", job_url=url + "/", source_url=url)
+    assert await history.is_posted(reworded)
 
 
 @pytest.mark.asyncio

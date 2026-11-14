@@ -97,3 +97,23 @@ def test_trusted_members():
 def test_url_caps():
     assert max_urls_for(False) == MAX_URLS_PER_REQUEST == 20
     assert max_urls_for(True) == MAX_URLS_PER_REQUEST_TRUSTED == 50
+
+
+def test_release_gives_back_exactly_the_recorded_slot():
+    clock = FakeClock()
+    limiter = RequestRateLimiter(max_per_hour=2, max_per_day=100, clock=clock)
+
+    first = limiter.acquire(1)
+    clock.advance(10)
+    second = limiter.acquire(1)
+    assert not limiter.acquire(1).allowed
+
+    limiter.release(1, first)
+    assert limiter.acquire(1).allowed
+    assert not limiter.acquire(1).allowed
+
+    # Releasing a blocked decision, or the same slot twice, changes nothing.
+    limiter.release(1, limiter.acquire(1))
+    limiter.release(1, first)
+    assert not limiter.acquire(1).allowed
+    assert second.stamp is not None

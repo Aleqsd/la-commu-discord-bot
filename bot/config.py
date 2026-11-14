@@ -36,7 +36,6 @@ class BotConfig:
     openai: OpenAIConfig
     channels: ChannelConfig = field(default_factory=ChannelConfig)
     max_scrape_bytes: int = 3_000_000
-    max_image_bytes: int = 5_000_000
     request_timeout: float = 30.0
     response_timeout: float = 60.0
     # Users listed here (plus Manage Server / Administrator members) bypass the /jobbot limits.
@@ -124,7 +123,6 @@ def load_config() -> BotConfig:
         openai=openai_cfg,
         channels=channels,
         max_scrape_bytes=int(os.getenv("MAX_SCRAPE_BYTES", BotConfig.__dataclass_fields__["max_scrape_bytes"].default)),
-        max_image_bytes=int(os.getenv("MAX_IMAGE_BYTES", BotConfig.__dataclass_fields__["max_image_bytes"].default)),
         request_timeout=float(os.getenv("REQUEST_TIMEOUT", BotConfig.__dataclass_fields__["request_timeout"].default)),
         response_timeout=float(os.getenv("RESPONSE_TIMEOUT", BotConfig.__dataclass_fields__["response_timeout"].default)),
         trusted_user_ids=_parse_user_ids(os.getenv("JOBBOT_TRUSTED_USER_IDS")),

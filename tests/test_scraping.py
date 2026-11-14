@@ -11,27 +11,18 @@ REAL_ASYNC_CLIENT = httpx.AsyncClient
 PUBLIC_IP = "93.184.216.34"
 
 
-class DummyResponse:
-    def __init__(self, *, text: str = "", content: bytes = b""):
-        self.text = text
-        self.content = content
+class FakeNetworkStream:
+    """Stands in for httpcore's network stream: only ``server_addr`` matters here."""
 
-    def raise_for_status(self) -> None:
-        return None
+    def __init__(self, server_addr):
+        self.server_addr = server_addr
+
+    def get_extra_info(self, info):
+        return self.server_addr if info == "server_addr" else None
 
 
-class DummyClient:
-    def __init__(self, response: DummyResponse):
-        self._response = response
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-    async def get(self, url: str):
-        return self._response
+def public_peer(request):
+    return (PUBLIC_IP, 443)
 
 
 def install_resolver(monkeypatch, mapping):
@@ -57,8 +48,12 @@ def install_resolver(monkeypatch, mapping):
     return lookups
 
 
-def install_transport(monkeypatch, handler):
-    """Serve every request from ``handler`` (no real HTTP); returns the requests seen."""
+def install_transport(monkeypatch, handler, peer=public_peer):
+    """Serve every request from ``handler`` (no real HTTP); returns the requests seen.
+
+    ``peer(request)`` is the server address reported through the ``network_stream``
+    extension (None leaves the extension out).
+    """
     requests = []
 
     async def recording_handler(request: httpx.Request):
@@ -66,6 +61,9 @@ def install_transport(monkeypatch, handler):
         result = handler(request)
         if asyncio.iscoroutine(result):
             result = await result
+        address = peer(request)
+        if address is not None and "network_stream" not in result.extensions:
+            result.extensions["network_stream"] = FakeNetworkStream(address)
         return result
 
     def factory(*args, **kwargs):
@@ -97,9 +95,10 @@ async def test_fetch_page_text_strips_scripts(monkeypatch):
     install_resolver(monkeypatch, {"jobs.example.com": [PUBLIC_IP]})
     install_transport(monkeypatch, lambda request: html_response(html))
 
-    text = await scraping.fetch_page_text("https://jobs.example.com", timeout=5, max_bytes=10_000)
+    page = await scraping.fetch_page_text("https://jobs.example.com", timeout=5, max_bytes=10_000)
 
-    assert text is not None
+    assert page is not None
+    text = page.text
     assert "Producer" in text
     assert "Remote role" in text
     for hidden in ("console.log", "p {}", "Site banner", "Home | About", "Enable JS", "Copyright"):
@@ -187,9 +186,9 @@ async def test_relative_redirect_is_followed_and_validated(monkeypatch):
 
     requests = install_transport(monkeypatch, handler)
 
-    text = await scraping.fetch_page_text("https://jobs.example.com/start", timeout=5, max_bytes=10_000)
+    page = await scraping.fetch_page_text("https://jobs.example.com/start", timeout=5, max_bytes=10_000)
 
-    assert text == "Level Designer"
+    assert page.text == "Level Designer"
     assert [str(request.url) for request in requests] == [
         "https://jobs.example.com/start",
         "https://jobs.example.com/careers",
@@ -238,8 +237,9 @@ async def test_text_plain_and_xhtml_are_accepted(monkeypatch):
     plain = await scraping.fetch_page_text("https://jobs.example.com/plain", timeout=5, max_bytes=10_000)
     xhtml = await scraping.fetch_page_text("https://jobs.example.com/xhtml", timeout=5, max_bytes=10_000)
 
-    assert plain == "Gameplay Programmer\nLyon"
-    assert xhtml == "Tech Artist"
+    assert plain.text == "Gameplay Programmer\nLyon"
+    assert plain.links == ()
+    assert xhtml.text == "Tech Artist"
 
 
 @pytest.mark.asyncio
@@ -284,10 +284,10 @@ async def test_reading_stops_at_max_bytes(monkeypatch):
         lambda request: httpx.Response(200, headers={"Content-Type": "text/html"}, content=endless_body()),
     )
 
-    text = await scraping.fetch_page_text("https://jobs.example.com", timeout=5, max_bytes=5_000)
+    page = await scraping.fetch_page_text("https://jobs.example.com", timeout=5, max_bytes=5_000)
 
-    assert text is not None
-    assert len(text) <= 5_000
+    assert page is not None
+    assert len(page.text) <= 5_000
     assert len(chunks_sent) <= 6
 
 
@@ -325,9 +325,9 @@ async def test_charset_from_headers_is_used(monkeypatch):
         ),
     )
 
-    text = await scraping.fetch_page_text("https://jobs.example.com", timeout=5, max_bytes=10_000)
+    page = await scraping.fetch_page_text("https://jobs.example.com", timeout=5, max_bytes=10_000)
 
-    assert text == "Concepteur de niveaux, Montréal"
+    assert page.text == "Concepteur de niveaux, Montréal"
 
 
 @pytest.mark.asyncio
@@ -343,41 +343,154 @@ async def test_html_parsing_runs_off_the_event_loop(monkeypatch):
 
     monkeypatch.setattr(scraping, "run_blocking", spy)
 
-    assert await scraping.fetch_page_text("https://jobs.example.com", timeout=5, max_bytes=10_000) == "Animator"
-    assert calls == [scraping._extract_text]
+    page = await scraping.fetch_page_text("https://jobs.example.com", timeout=5, max_bytes=10_000)
+
+    assert page.text == "Animator"
+    assert calls == [scraping._extract_page]
 
 
 @pytest.mark.asyncio
-async def test_fetch_image_bytes_returns_content(monkeypatch):
-    payload = b"image-bytes"
-    response = DummyResponse(content=payload)
-
-    def fake_client(*args, **kwargs):
-        return DummyClient(response)
-
-    monkeypatch.setattr(scraping.httpx, "AsyncClient", fake_client)
-
-    content = await scraping.fetch_image_bytes(
-        "https://cdn.example.com/poster.png",
-        timeout=5,
-        max_bytes=1024,
+async def test_unusable_charset_falls_back_to_utf8(monkeypatch):
+    install_resolver(monkeypatch, {"jobs.example.com": [PUBLIC_IP]})
+    install_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200,
+            headers={"Content-Type": "text/html; charset=idna"},
+            content="<p>Développeur gameplay</p>".encode("utf-8"),
+        ),
     )
-    assert content == payload
+
+    page = await scraping.fetch_page_text("https://jobs.example.com", timeout=5, max_bytes=10_000)
+
+    assert page.text == "Développeur gameplay"
+
+
+# --- Peer address (DNS rebinding) ---------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_fetch_image_bytes_returns_none_when_too_large(monkeypatch):
-    payload = b"x" * 10
-    response = DummyResponse(content=payload)
+@pytest.mark.parametrize(
+    "server_addr",
+    [
+        ("127.0.0.1", 443),
+        ("10.0.0.7", 80),
+        ("::1", 443, 0, 0),
+        ("::ffff:127.0.0.1", 443, 0, 0),
+        ("fe80::1%eth0", 443, 0, 2),
+        None,
+    ],
+)
+async def test_peer_address_is_checked_before_reading(monkeypatch, server_addr):
+    # DNS said public, but the connection landed somewhere else (or cannot be verified).
+    install_resolver(monkeypatch, {"jobs.example.com": [PUBLIC_IP]})
+    consumed = []
 
-    def fake_client(*args, **kwargs):
-        return DummyClient(response)
+    async def body():
+        consumed.append(True)
+        yield b"<p>internal admin page</p>"
 
-    monkeypatch.setattr(scraping.httpx, "AsyncClient", fake_client)
-
-    content = await scraping.fetch_image_bytes(
-        "https://cdn.example.com/poster.png",
-        timeout=5,
-        max_bytes=5,
+    install_transport(
+        monkeypatch,
+        lambda request: httpx.Response(200, headers={"Content-Type": "text/html"}, content=body()),
+        peer=lambda request: server_addr,
     )
-    assert content is None
+
+    assert await scraping.fetch_page_text("https://jobs.example.com", timeout=5, max_bytes=10_000) is None
+    assert consumed == []
+
+
+@pytest.mark.asyncio
+async def test_public_ipv6_peer_is_accepted(monkeypatch):
+    install_resolver(monkeypatch, {"jobs.example.com": ["2606:2800:220:1:248:1893:25c8:1946"]})
+    install_transport(
+        monkeypatch,
+        lambda request: html_response("<p>Sound Designer</p>"),
+        peer=lambda request: ("2606:2800:220:1:248:1893:25c8:1946", 443, 0, 0),
+    )
+
+    page = await scraping.fetch_page_text("https://jobs.example.com", timeout=5, max_bytes=10_000)
+
+    assert page.text == "Sound Designer"
+
+
+@pytest.mark.asyncio
+async def test_peer_address_is_checked_on_every_hop(monkeypatch):
+    install_resolver(
+        monkeypatch,
+        {"jobs.example.com": [PUBLIC_IP], "careers.example.com": [PUBLIC_IP]},
+    )
+
+    def handler(request):
+        if request.url.host == "jobs.example.com":
+            return httpx.Response(302, headers={"Location": "https://careers.example.com/open"})
+        return html_response("<p>internal</p>")
+
+    def peer(request):
+        # The second host rebinds to loopback between the lookup and the connection.
+        return (PUBLIC_IP, 443) if request.url.host == "jobs.example.com" else ("127.0.0.1", 443)
+
+    requests = install_transport(monkeypatch, handler, peer=peer)
+
+    assert await scraping.fetch_page_text("https://jobs.example.com/start", timeout=5, max_bytes=10_000) is None
+    assert [request.url.host for request in requests] == ["jobs.example.com", "careers.example.com"]
+
+
+@pytest.mark.asyncio
+async def test_redirect_from_private_peer_is_not_followed(monkeypatch):
+    install_resolver(monkeypatch, {"jobs.example.com": [PUBLIC_IP]})
+    requests = install_transport(
+        monkeypatch,
+        lambda request: httpx.Response(302, headers={"Location": "/next"}),
+        peer=lambda request: ("192.168.0.10", 443),
+    )
+
+    assert await scraping.fetch_page_text("https://jobs.example.com/start", timeout=5, max_bytes=10_000) is None
+    assert len(requests) == 1
+
+
+def test_peer_check_reads_httpcore_server_addr():
+    request = httpx.Request("GET", "https://jobs.example.com/")
+    ok = httpx.Response(200, request=request, extensions={"network_stream": FakeNetworkStream((PUBLIC_IP, 443))})
+    scraping.ensure_public_peer(ok)
+
+    for extensions in ({}, {"network_stream": FakeNetworkStream(None)}):
+        missing = httpx.Response(200, request=request, extensions=extensions)
+        with pytest.raises(scraping.UnsafeURLError):
+            scraping.ensure_public_peer(missing)
+
+
+# --- Links ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_page_links_are_resolved_against_the_final_url(monkeypatch):
+    install_resolver(monkeypatch, {"studio.example.com": [PUBLIC_IP]})
+    html = """
+        <nav><a href="/about">About</a></nav>
+        <main>
+            <a href="https://jobs.lever.co/studio/123#apply">Senior Artist</a>
+            <a href="456">Animator</a>
+            <a href="https://jobs.lever.co/studio/123">Senior Artist (again)</a>
+            <a href="//boards.greenhouse.io/studio/jobs/789">Producer</a>
+            <a href="mailto:jobs@studio.example.com">Email us</a>
+            <a href="javascript:void(0)">Menu</a>
+            <a>No href</a>
+        </main>
+    """
+
+    def handler(request):
+        if request.url.path == "/careers":
+            return httpx.Response(301, headers={"Location": "/en/careers/"})
+        return html_response(html)
+
+    install_transport(monkeypatch, handler)
+
+    page = await scraping.fetch_page_text("https://studio.example.com/careers", timeout=5, max_bytes=10_000)
+
+    # Page order, deduplicated, nav links and non-http targets left out.
+    assert page.links == (
+        "https://jobs.lever.co/studio/123",
+        "https://studio.example.com/en/careers/456",
+        "https://boards.greenhouse.io/studio/jobs/789",
+    )

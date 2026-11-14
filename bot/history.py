@@ -68,33 +68,29 @@ def _normalize_text(value: Optional[str]) -> str:
 def build_job_key(job: "JobPosting") -> str:
     """Key written to history.
 
-    A job with its own URL is keyed by that URL. A job that only carries its source
-    (page or image listing several offers) is keyed by source + company + title.
+    Normally the normalized job URL alone, so re-posting a link is caught whatever title
+    or company the model writes. Only jobs flagged ``shared_link`` (several offers from one
+    source sharing that URL) are keyed by URL + company + title.
     """
     job_url = normalize_url(job.job_url)
-    source_url = normalize_url(job.source_url)
-    if job_url and job_url != source_url:
+    if job_url and not job.shared_link:
         return job_url
-    base = source_url or job_url
     company = _normalize_text(job.company_name)
     title = _normalize_text(job.job_title)
-    if not (base or company or title):
+    if not (job_url or company or title):
         return ""
-    return f"{base}|{company}|{title}"
+    return f"{job_url}|{company}|{title}"
 
 
 def build_legacy_key(job: "JobPosting") -> str:
-    """Key produced by the original algorithm, matched against existing history lines."""
-    url = (job.job_url or "").strip().lower()
-    if url:
-        return url.split("#", 1)[0].rstrip("/")
+    """URL-only key of the original algorithm, matched against existing history lines.
 
-    company = (job.company_name or "").strip().lower()
-    title = (job.job_title or "").strip().lower()
-    team = (job.team or "").strip().lower()
-    if not company and not title:
+    Empty for shared-link jobs: an old line for a careers page must not block every
+    offer listed on it.
+    """
+    if job.shared_link:
         return ""
-    return "|".join(filter(None, (company, title, team)))
+    return legacy_normalize_url(job.job_url)
 
 
 class PostHistory:

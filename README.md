@@ -27,7 +27,7 @@
 - Slash commands return friendly, developer-focused feedback (with troubleshooting notes when parsing fails).
 - Configurable channel mapping and OpenAI models (separate text vs. vision) via environment variables.
 - Ready-to-run Docker image.
-- Skips reposting jobs that were already shared by tracking them in `data/posted_jobs.log` (normalized job URL, or source + company + title for offers without their own link).
+- Skips reposting jobs that were already shared by tracking them in `data/posted_jobs.log` (normalized job URL; URL + company + title when several offers from one source share a link).
 
 ## Requirements
 
@@ -74,8 +74,7 @@
 | `OPENAI_TEMPERATURE`           | Model temperature. Leave unset for gpt-5.4+ / gpt-6 models, which reject it.                                           | unset                  |
 | `JOB_TEAM_CHANNEL_IDS`         | Comma-separated mapping of team→channel ID (e.g. `art:123,...`). IDs must belong to the same guild where the bot runs. | —                      |
 | `MAX_SCRAPE_BYTES`             | Max bytes downloaded from a page (larger pages are cut off or refused).                                                | `3000000`              |
-| `MAX_IMAGE_BYTES`              | Max image payload size (bytes).                                                                                        | `5000000`              |
-| `REQUEST_TIMEOUT`              | Page/image fetch timeout in seconds.                                                                                   | `30`                   |
+| `REQUEST_TIMEOUT`              | Page fetch timeout in seconds.                                                                                         | `30`                   |
 | `RESPONSE_TIMEOUT`             | OpenAI request timeout in seconds (one retry).                                                                         | `60`                   |
 | `PORT`                         | HTTP health port for hosting platforms (Scaleway expects 8080).                                                        | `8080`                 |
 | `LOG_LEVEL`                    | Root logging level (`DEBUG`, `INFO`, ...).                                                                             | `INFO`                 |

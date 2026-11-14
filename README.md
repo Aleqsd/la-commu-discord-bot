@@ -33,7 +33,7 @@
 
 - Python 3.12+ (or Docker)
 - Discord bot token with the **Message Content Intent** enabled.
-- OpenAI API key (default model: `gpt-4o-mini`; optional vision model override).
+- OpenAI API key (default model: `gpt-6.1-terra`; optional vision model override).
 
 ## Setup (Local)
 
@@ -69,9 +69,9 @@
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------- |
 | `DISCORD_BOT_TOKEN`    | Discord bot token.                                                                                                     | —                      |
 | `OPENAI_API_KEY`       | OpenAI API key.                                                                                                        | —                      |
-| `OPENAI_MODEL`         | OpenAI text model name.                                                                                                | `gpt-4o-mini`          |
+| `OPENAI_MODEL`         | OpenAI text model name.                                                                                                | `gpt-6.1-terra`        |
 | `OPENAI_IMAGE_MODEL`   | Optional OpenAI vision-capable model.                                                                                  | mirrors `OPENAI_MODEL` |
-| `OPENAI_TEMPERATURE`   | Model temperature.                                                                                                     | `0.1`                  |
+| `OPENAI_TEMPERATURE`   | Model temperature. Leave unset for gpt-5.4+ / gpt-6 models, which reject it.                                           | unset                  |
 | `JOB_TEAM_CHANNEL_IDS` | Comma-separated mapping of team→channel ID (e.g. `art:123,...`). IDs must belong to the same guild where the bot runs. | —                      |
 | `MAX_SCRAPE_BYTES`     | Max characters read from a page.                                                                                       | `600000`               |
 | `MAX_IMAGE_BYTES`      | Max image payload size (bytes).                                                                                        | `5000000`              |

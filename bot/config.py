@@ -24,8 +24,9 @@ class ChannelConfig:
 @dataclass(slots=True)
 class OpenAIConfig:
     api_key: str
-    model: str = "gpt-4o-mini"
-    temperature: float = 0.1
+    model: str = "gpt-6.1-terra"
+    # Current models (gpt-5.4+, gpt-6) reject temperature: leave unset unless using an older model.
+    temperature: float | None = None
     image_model: str | None = None
 
 
@@ -67,6 +68,12 @@ def _parse_team_channel_ids(raw: str | None) -> Dict[str, int]:
     return base
 
 
+def _parse_optional_float(raw: str | None) -> float | None:
+    if raw is None or not raw.strip():
+        return None
+    return float(raw)
+
+
 def load_config() -> BotConfig:
     discord_token = os.getenv("DISCORD_BOT_TOKEN")
     openai_key = os.getenv("OPENAI_API_KEY")
@@ -87,7 +94,7 @@ def load_config() -> BotConfig:
     openai_cfg = OpenAIConfig(
         api_key=openai_key,
         model=os.getenv("OPENAI_MODEL", OpenAIConfig.__dataclass_fields__["model"].default),
-        temperature=float(os.getenv("OPENAI_TEMPERATURE", OpenAIConfig.__dataclass_fields__["temperature"].default)),
+        temperature=_parse_optional_float(os.getenv("OPENAI_TEMPERATURE")),
         image_model=os.getenv("OPENAI_IMAGE_MODEL"),
     )
     return BotConfig(

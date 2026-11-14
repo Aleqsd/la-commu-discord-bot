@@ -59,13 +59,17 @@ class OpenAIJobParser:
         return _extract_jobs(raw_text)
 
     async def _call_openai(self, messages: Iterable[Dict[str, Any]], *, model: str) -> str:
+        request: Dict[str, Any] = {
+            "model": model,
+            "input": list(messages),
+            # Reasoning models spend part of this budget before writing the JSON.
+            "max_output_tokens": 4000,
+        }
+        if self._config.temperature is not None:
+            request["temperature"] = self._config.temperature
+
         def _send_request() -> str:
-            response = self._client.responses.create(
-                model=model,
-                temperature=self._config.temperature,
-                input=list(messages),
-                max_output_tokens=1200,
-            )
+            response = self._client.responses.create(**request)
             return response.output_text
 
         try:

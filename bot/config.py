@@ -35,7 +35,7 @@ class BotConfig:
     discord_token: str
     openai: OpenAIConfig
     channels: ChannelConfig = field(default_factory=ChannelConfig)
-    max_scrape_bytes: int = 600_000
+    max_scrape_bytes: int = 3_000_000
     max_image_bytes: int = 5_000_000
     request_timeout: float = 30.0
     response_timeout: float = 60.0

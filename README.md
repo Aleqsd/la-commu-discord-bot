@@ -73,7 +73,7 @@
 | `OPENAI_IMAGE_MODEL`           | Optional OpenAI vision-capable model.                                                                                  | mirrors `OPENAI_MODEL` |
 | `OPENAI_TEMPERATURE`           | Model temperature. Leave unset for gpt-5.4+ / gpt-6 models, which reject it.                                           | unset                  |
 | `JOB_TEAM_CHANNEL_IDS`         | Comma-separated mapping of team→channel ID (e.g. `art:123,...`). IDs must belong to the same guild where the bot runs. | —                      |
-| `MAX_SCRAPE_BYTES`             | Max bytes downloaded from a page (larger pages are cut off or refused).                                                | `600000`               |
+| `MAX_SCRAPE_BYTES`             | Max bytes downloaded from a page (larger pages are cut off or refused).                                                | `3000000`              |
 | `MAX_IMAGE_BYTES`              | Max image payload size (bytes).                                                                                        | `5000000`              |
 | `REQUEST_TIMEOUT`              | Page/image fetch timeout in seconds.                                                                                   | `30`                   |
 | `RESPONSE_TIMEOUT`             | OpenAI request timeout in seconds (one retry).                                                                         | `60`                   |

@@ -2,12 +2,99 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Set
+from typing import TYPE_CHECKING, Optional, Set
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from .utils import run_blocking
 
 if TYPE_CHECKING:
     from .models import JobPosting
+
+TRACKING_PARAMS = frozenset({"trackingid", "refid", "fbclid", "gclid"})
+TRACKING_PARAM_PREFIXES = ("utm_",)
+
+
+def _is_tracking_param(name: str) -> bool:
+    lowered = name.lower()
+    return lowered in TRACKING_PARAMS or lowered.startswith(TRACKING_PARAM_PREFIXES)
+
+
+def legacy_normalize_url(url: Optional[str]) -> str:
+    """Normalisation used by the original history format (kept to read old entries)."""
+    return (url or "").strip().lower().split("#", 1)[0].rstrip("/")
+
+
+def normalize_url(url: Optional[str]) -> str:
+    """Canonical form of a URL for duplicate detection.
+
+    Lowercases scheme and host, treats http and https alike, strips ``www.``, drops the
+    fragment, credentials, default ports and tracking parameters, sorts the remaining
+    query parameters and removes the trailing slash.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        return legacy_normalize_url(raw)
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if not scheme or not host:
+        return legacy_normalize_url(raw)
+    if scheme == "http":
+        scheme = "https"
+    if host.startswith("www."):
+        host = host[4:]
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = host if port in (None, 80, 443) else f"{host}:{port}"
+    path = parts.path.rstrip("/")
+    query = urlencode(
+        sorted(
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if not _is_tracking_param(key)
+        )
+    )
+    return f"{scheme}://{netloc}{path}" + (f"?{query}" if query else "")
+
+
+def _normalize_text(value: Optional[str]) -> str:
+    return " ".join((value or "").split()).casefold()
+
+
+def build_job_key(job: "JobPosting") -> str:
+    """Key written to history.
+
+    A job with its own URL is keyed by that URL. A job that only carries its source
+    (page or image listing several offers) is keyed by source + company + title.
+    """
+    job_url = normalize_url(job.job_url)
+    source_url = normalize_url(job.source_url)
+    if job_url and job_url != source_url:
+        return job_url
+    base = source_url or job_url
+    company = _normalize_text(job.company_name)
+    title = _normalize_text(job.job_title)
+    if not (base or company or title):
+        return ""
+    return f"{base}|{company}|{title}"
+
+
+def build_legacy_key(job: "JobPosting") -> str:
+    """Key produced by the original algorithm, matched against existing history lines."""
+    url = (job.job_url or "").strip().lower()
+    if url:
+        return url.split("#", 1)[0].rstrip("/")
+
+    company = (job.company_name or "").strip().lower()
+    title = (job.job_title or "").strip().lower()
+    team = (job.team or "").strip().lower()
+    if not company and not title:
+        return ""
+    return "|".join(filter(None, (company, title, team)))
 
 
 class PostHistory:
@@ -31,11 +118,11 @@ class PostHistory:
 
     async def is_posted(self, job: "JobPosting") -> bool:
         await self.load()
-        key = self._build_key(job)
-        if not key:
+        keys = {key for key in (build_job_key(job), build_legacy_key(job)) if key}
+        if not keys:
             return False
         async with self._lock:
-            return key in self._seen
+            return any(key in self._seen for key in keys)
 
     async def mark_posted(self, job: "JobPosting") -> None:
         await self.load()
@@ -61,14 +148,4 @@ class PostHistory:
             handle.write(f"{key}\n")
 
     def _build_key(self, job: "JobPosting") -> str:
-        url = (job.job_url or "").strip().lower()
-        if url:
-            sanitized = url.split("#", 1)[0].rstrip("/")
-            return sanitized
-
-        company = (job.company_name or "").strip().lower()
-        title = (job.job_title or "").strip().lower()
-        team = (job.team or "").strip().lower()
-        if not company and not title:
-            return ""
-        return "|".join(filter(None, (company, title, team)))
+        return build_job_key(job)

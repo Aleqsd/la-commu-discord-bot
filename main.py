@@ -49,7 +49,7 @@ configure_logging(DEFAULT_LOG_FILE)
 
 async def run_bot() -> None:
     config = load_config()
-    parser = OpenAIJobParser(config.openai)
+    parser = OpenAIJobParser(config.openai, timeout=config.response_timeout)
     retry_manager = RetryManager(Path("data/pending_requests.json"))
     post_history = PostHistory(Path("data/posted_jobs.log"))
     await post_history.load()

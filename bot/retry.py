@@ -20,6 +20,8 @@ class PendingRequest:
     created_at: float
     attempts: int = 0
     last_error: str | None = None
+    # URL cap that applied when the request was made (None for entries written before it existed).
+    max_urls: int | None = None
 
 
 class RetryManager:
@@ -40,6 +42,7 @@ class RetryManager:
         guild_id: int,
         user_id: int,
         reference: str,
+        max_urls: int | None = None,
     ) -> None:
         async with self._lock:
             entries = self._load()
@@ -48,6 +51,7 @@ class RetryManager:
                     entry.reference = reference
                     entry.guild_id = guild_id
                     entry.user_id = user_id
+                    entry.max_urls = max_urls
                     break
             else:
                 entries.append(
@@ -57,6 +61,7 @@ class RetryManager:
                         user_id=user_id,
                         reference=reference,
                         created_at=time.time(),
+                        max_urls=max_urls,
                     )
                 )
             self._save(entries)

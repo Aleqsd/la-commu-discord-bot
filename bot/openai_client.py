@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You extract structured summaries from video game industry job postings. "
-    "Always return a JSON array of job objects. Each job object can contain: "
-    "job_title, company_name, job_url, source_url, location, work_model (Remote, Hybrid, Onsite), "
+    'Always answer with a single JSON object of the form {"jobs": [...]}, where "jobs" is an array '
+    "with one object per distinct job posting (an empty array when there is none). Each job object can contain: "
+    "job_title, company_name, job_url (absolute URL of that specific posting, only when the source gives one), "
+    "source_url, location, work_model (Remote, Hybrid, Onsite), "
     "seniority (Junior, Mid, Senior, Lead, Director), contract_type, remote_friendly (boolean), compensation, "
     "description_summary, skills (array of short phrases), team (art, game_design, dev, others), known_titles (array). "
     "Omit keys when information is unavailable. Keep values concise and human friendly."
@@ -22,22 +24,50 @@ SYSTEM_PROMPT = (
 
 TEXT_PROMPT_TEMPLATE = (
     "Parse every distinct job posting present in the following page copy. "
-    "Return one JSON array with a dictionary per job."
+    'Return the JSON object {{"jobs": [...]}} with one dictionary per job.'
     "\nSource URL: {url}\n" + "-" * 40 + "\n{content}\n"
 )
 
 IMAGE_PROMPT_TEMPLATE = (
     "Parse every distinct job posting present in this image capture. "
-    "If multiple jobs exist, include them all in the JSON array."
+    'Return the JSON object {{"jobs": [...]}}; if multiple jobs exist, include them all in the "jobs" array.'
     "\nSource Reference: {url}"
 )
 
-MAX_PROMPT_CHARS = 6000
+MAX_PROMPT_CHARS = 30000
+DEFAULT_TIMEOUT = 60.0
+
+JOB_KEYS = frozenset(
+    {
+        "job_title",
+        "company_name",
+        "job_url",
+        "source_url",
+        "location",
+        "work_model",
+        "seniority",
+        "contract_type",
+        "remote_friendly",
+        "compensation",
+        "description_summary",
+        "skills",
+        "team",
+        "known_titles",
+    }
+)
+
+
+class OpenAIRequestError(RuntimeError):
+    """The OpenAI call itself failed (network, timeout, API error), as opposed to unparseable output."""
+
+    def __init__(self, error_type: str, message: str = "") -> None:
+        super().__init__(message or error_type)
+        self.error_type = error_type
 
 
 class OpenAIJobParser:
-    def __init__(self, config: OpenAIConfig) -> None:
-        self._client = OpenAI(api_key=config.api_key)
+    def __init__(self, config: OpenAIConfig, *, timeout: float = DEFAULT_TIMEOUT) -> None:
+        self._client = OpenAI(api_key=config.api_key, timeout=timeout, max_retries=1)
         self._text_model = config.model
         self._image_model = config.image_model or config.model
         self._config = config
@@ -59,26 +89,41 @@ class OpenAIJobParser:
         return _extract_jobs(raw_text)
 
     async def _call_openai(self, messages: Iterable[Dict[str, Any]], *, model: str) -> str:
+        """Return the model's text output; raise OpenAIRequestError when the request fails."""
         request: Dict[str, Any] = {
             "model": model,
             "input": list(messages),
             # Reasoning models spend part of this budget before writing the JSON.
             "max_output_tokens": 4000,
+            "text": {"format": {"type": "json_object"}},
         }
         if self._config.temperature is not None:
             request["temperature"] = self._config.temperature
 
-        def _send_request() -> str:
-            response = self._client.responses.create(**request)
-            return response.output_text
+        def _send_request() -> Any:
+            return self._client.responses.create(**request)
 
         try:
-            raw_text = await run_blocking(_send_request)
-            logger.info("🤖 OpenAI responded with %s characters", len(raw_text))
-            return raw_text
+            response = await run_blocking(_send_request)
         except Exception as exc:  # noqa: BLE001
-            logger.error("🚫 OpenAI request failed: %s", exc)
-            return ""
+            error_type = type(exc).__name__
+            logger.error("🚫 OpenAI request failed (%s): %s", error_type, exc)
+            raise OpenAIRequestError(error_type, str(exc)) from exc
+
+        status = getattr(response, "status", None)
+        if status == "incomplete":
+            logger.warning(
+                "⚠️ OpenAI response incomplete: %s",
+                getattr(response, "incomplete_details", None),
+            )
+        elif status in {"failed", "cancelled"}:
+            error = getattr(response, "error", None)
+            logger.error("🚫 OpenAI response %s: %s", status, error)
+            raise OpenAIRequestError(f"Response{status.capitalize()}", str(error or status))
+
+        raw_text = getattr(response, "output_text", "") or ""
+        logger.info("🤖 OpenAI responded with %s characters", len(raw_text))
+        return raw_text
 
 
 def _build_text_messages(prompt: str) -> List[Dict[str, Any]]:
@@ -101,6 +146,47 @@ def _build_image_messages(prompt: str, image_url: str) -> List[Dict[str, Any]]:
     ]
 
 
+_NOT_JOBS = object()
+
+
+def _jobs_from_payload(data: Any) -> Any:
+    """Return the job dicts held by a decoded payload, or _NOT_JOBS if it holds none."""
+    if isinstance(data, dict):
+        if "jobs" in data:
+            jobs = data["jobs"]
+            if isinstance(jobs, dict):
+                return [jobs]
+            if isinstance(jobs, list):
+                return [item for item in jobs if isinstance(item, dict)]
+            return _NOT_JOBS
+        if JOB_KEYS.intersection(data):
+            return [data]
+        return _NOT_JOBS
+    if isinstance(data, list):
+        jobs = [item for item in data if isinstance(item, dict)]
+        if data and not jobs:
+            return _NOT_JOBS
+        return jobs
+    return _NOT_JOBS
+
+
+def _decode_candidates(text: str) -> Iterable[Any]:
+    """Yield JSON values found in ``text``: the whole text first, then from each '[' or '{'."""
+    try:
+        yield json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char not in "[{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            continue
+        yield value
+
+
 def _extract_jobs(text: str) -> List[Dict[str, Any]]:
     if not text:
         return []
@@ -108,36 +194,26 @@ def _extract_jobs(text: str) -> List[Dict[str, Any]]:
     if text.startswith("```"):
         text = "\n".join(line for line in text.splitlines() if not line.strip().startswith("```"))
         text = text.strip()
-    start = text.find("[")
-    end = text.rfind("]")
-    if start == -1 or end == -1:
-        # Fallback to single object parsing
-        obj_start = text.find("{")
-        obj_end = text.rfind("}")
-        if obj_start == -1 or obj_end == -1:
-            preview = text[:200].replace("\n", " ")
-            logger.warning("⚠️ No JSON payload detected in OpenAI response (preview: %s...)", preview)
-            return []
-        json_str = text[obj_start : obj_end + 1]
+
+    first_value: Any = _NOT_JOBS
+    reported_empty = False
+    for value in _decode_candidates(text):
+        if first_value is _NOT_JOBS:
+            first_value = value
+        jobs = _jobs_from_payload(value)
+        if jobs is _NOT_JOBS:
+            continue
+        if jobs:
+            return jobs
+        reported_empty = True
+
+    preview = text[:200].replace("\n", " ")
+    if reported_empty:
+        logger.info("📭 OpenAI reported no job postings")
+    elif first_value is _NOT_JOBS:
+        logger.warning("⚠️ No JSON payload detected in OpenAI response (preview: %s...)", preview)
+    elif isinstance(first_value, list):
+        logger.warning("⚠️ JSON array contained no dict objects (preview: %s...)", preview)
     else:
-        json_str = text[start : end + 1]
-
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError as exc:
-        logger.warning(
-            "⚠️ Failed to parse OpenAI JSON: %s | snippet=%s",
-            exc,
-            json_str[:200].replace("\n", " "),
-        )
-        return []
-
-    if isinstance(data, dict):
-        return [data]
-    if isinstance(data, list):
-        jobs = [item for item in data if isinstance(item, dict)]
-        if not jobs:
-            logger.warning("⚠️ JSON array contained no dict objects")
-        return jobs
-    logger.warning("⚠️ Unexpected JSON type: %s", type(data))
+        logger.warning("⚠️ OpenAI JSON did not contain job objects (preview: %s...)", preview)
     return []

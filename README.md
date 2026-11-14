@@ -27,7 +27,7 @@
 - Slash commands return friendly, developer-focused feedback (with troubleshooting notes when parsing fails).
 - Configurable channel mapping and OpenAI models (separate text vs. vision) via environment variables.
 - Ready-to-run Docker image.
-- Skips reposting jobs that were already shared by tracking their URLs in `data/posted_jobs.log`.
+- Skips reposting jobs that were already shared by tracking them in `data/posted_jobs.log` (normalized job URL, or source + company + title for offers without their own link).
 
 ## Requirements
 
@@ -65,26 +65,29 @@
 
 ## Environment Variables
 
-| Variable               | Description                                                                                                            | Default                |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| `DISCORD_BOT_TOKEN`    | Discord bot token.                                                                                                     | —                      |
-| `OPENAI_API_KEY`       | OpenAI API key.                                                                                                        | —                      |
-| `OPENAI_MODEL`         | OpenAI text model name.                                                                                                | `gpt-6.1-terra`        |
-| `OPENAI_IMAGE_MODEL`   | Optional OpenAI vision-capable model.                                                                                  | mirrors `OPENAI_MODEL` |
-| `OPENAI_TEMPERATURE`   | Model temperature. Leave unset for gpt-5.4+ / gpt-6 models, which reject it.                                           | unset                  |
-| `JOB_TEAM_CHANNEL_IDS` | Comma-separated mapping of team→channel ID (e.g. `art:123,...`). IDs must belong to the same guild where the bot runs. | —                      |
-| `MAX_SCRAPE_BYTES`     | Max characters read from a page.                                                                                       | `600000`               |
-| `MAX_IMAGE_BYTES`      | Max image payload size (bytes).                                                                                        | `5000000`              |
-| `REQUEST_TIMEOUT`      | Page/image fetch timeout in seconds.                                                                                   | `30`                   |
-| `RESPONSE_TIMEOUT`     | Reserved for future use.                                                                                               | `60`                   |
-| `PORT`                 | HTTP health port for hosting platforms (Scaleway expects 8080).                                                        | `8080`                 |
-| `LOG_LEVEL`            | Root logging level (`DEBUG`, `INFO`, ...).                                                                             | `INFO`                 |
+| Variable                       | Description                                                                                                            | Default                |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| `DISCORD_BOT_TOKEN`            | Discord bot token.                                                                                                     | —                      |
+| `OPENAI_API_KEY`               | OpenAI API key.                                                                                                        | —                      |
+| `OPENAI_MODEL`                 | OpenAI text model name.                                                                                                | `gpt-6.1-terra`        |
+| `OPENAI_IMAGE_MODEL`           | Optional OpenAI vision-capable model.                                                                                  | mirrors `OPENAI_MODEL` |
+| `OPENAI_TEMPERATURE`           | Model temperature. Leave unset for gpt-5.4+ / gpt-6 models, which reject it.                                           | unset                  |
+| `JOB_TEAM_CHANNEL_IDS`         | Comma-separated mapping of team→channel ID (e.g. `art:123,...`). IDs must belong to the same guild where the bot runs. | —                      |
+| `MAX_SCRAPE_BYTES`             | Max bytes downloaded from a page (larger pages are cut off or refused).                                                | `600000`               |
+| `MAX_IMAGE_BYTES`              | Max image payload size (bytes).                                                                                        | `5000000`              |
+| `REQUEST_TIMEOUT`              | Page/image fetch timeout in seconds.                                                                                   | `30`                   |
+| `RESPONSE_TIMEOUT`             | OpenAI request timeout in seconds (one retry).                                                                         | `60`                   |
+| `PORT`                         | HTTP health port for hosting platforms (Scaleway expects 8080).                                                        | `8080`                 |
+| `LOG_LEVEL`                    | Root logging level (`DEBUG`, `INFO`, ...).                                                                             | `INFO`                 |
+| `JOBBOT_TRUSTED_USER_IDS`      | Comma-separated Discord user IDs that bypass the `/jobbot` limits (as do Manage Server / Administrator members).       | —                      |
+| `JOBBOT_MAX_REQUESTS_PER_HOUR` | `/jobbot post` + `preview` requests per member per hour (sliding window, `0` disables).                                | `20`                   |
+| `JOBBOT_MAX_REQUESTS_PER_DAY`  | `/jobbot post` + `preview` requests per member per 24 h (sliding window, `0` disables).                                | `100`                  |
 
 ## How It Works
 
-1. Staff trigger `/jobbot post` or `/jobbot preview`, providing URLs or image references (including `image: https://...` syntax).
+1. Members trigger `/jobbot post` or `/jobbot preview`, providing URLs or image references (including `image: https://...` syntax).
 2. The bot fetches each URL/image, cleans the content, and primes it for OpenAI.
-3. OpenAI returns a JSON array of jobs; the bot classifies each into a team bucket.
+3. OpenAI returns a JSON object (`{"jobs": [...]}`); the bot classifies each job into a team bucket.
 4. For `/jobbot post`, embeds are dropped into the mapped channels with consistent formatting; `/jobbot preview` reports what _would_ happen.
 5. Detailed logs keep track of progress (`🌐`, `🖼️`, `📤`, etc.), while command responses surface any parsing or routing issues.
 
@@ -103,7 +106,9 @@ Although production currently runs on a DigitalOcean Droplet, the project still 
 
 - `/jobbot post [reference]` — Parse job URLs/posters and publish embeds to the team channels.
 - `/jobbot preview [reference]` — Inspect how the bot would route jobs (no posting).
-- `/jobbot status` — View the configured source + destination channels and cached routes (requires Manage Guild).
+- `/jobbot status` — View the configured source + destination channels and cached routes.
+
+All `/jobbot` commands are available to every server member. `post` and `preview` are rate-limited per member (`JOBBOT_MAX_REQUESTS_PER_HOUR` / `JOBBOT_MAX_REQUESTS_PER_DAY`, in memory, reset on restart) and read at most 20 URLs per request. Members with Manage Server or Administrator, and users listed in `JOBBOT_TRUSTED_USER_IDS`, skip the rate limit and may send up to 50 URLs. Server admins can still restrict who sees the commands under Server Settings > Integrations.
 
 ## Sharing Multi-Offer Sources
 

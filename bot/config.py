@@ -39,6 +39,10 @@ class BotConfig:
     max_image_bytes: int = 5_000_000
     request_timeout: float = 30.0
     response_timeout: float = 60.0
+    # Users listed here (plus Manage Server / Administrator members) bypass the /jobbot limits.
+    trusted_user_ids: frozenset[int] = frozenset()
+    max_requests_per_hour: int = 20
+    max_requests_per_day: int = 100
 
 
 def _parse_team_channel_ids(raw: str | None) -> Dict[str, int]:
@@ -66,6 +70,24 @@ def _parse_team_channel_ids(raw: str | None) -> Dict[str, int]:
             )
         base[team_key] = channel_id
     return base
+
+
+def _parse_user_ids(raw: str | None) -> frozenset[int]:
+    if not raw:
+        return frozenset()
+    user_ids = set()
+    for item in raw.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        try:
+            user_id = int(value)
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid user ID '{value}' in JOBBOT_TRUSTED_USER_IDS.") from exc
+        if user_id <= 0:
+            raise RuntimeError(f"User ID '{value}' in JOBBOT_TRUSTED_USER_IDS must be positive.")
+        user_ids.add(user_id)
+    return frozenset(user_ids)
 
 
 def _parse_optional_float(raw: str | None) -> float | None:
@@ -105,4 +127,7 @@ def load_config() -> BotConfig:
         max_image_bytes=int(os.getenv("MAX_IMAGE_BYTES", BotConfig.__dataclass_fields__["max_image_bytes"].default)),
         request_timeout=float(os.getenv("REQUEST_TIMEOUT", BotConfig.__dataclass_fields__["request_timeout"].default)),
         response_timeout=float(os.getenv("RESPONSE_TIMEOUT", BotConfig.__dataclass_fields__["response_timeout"].default)),
+        trusted_user_ids=_parse_user_ids(os.getenv("JOBBOT_TRUSTED_USER_IDS")),
+        max_requests_per_hour=int(os.getenv("JOBBOT_MAX_REQUESTS_PER_HOUR", BotConfig.__dataclass_fields__["max_requests_per_hour"].default)),
+        max_requests_per_day=int(os.getenv("JOBBOT_MAX_REQUESTS_PER_DAY", BotConfig.__dataclass_fields__["max_requests_per_day"].default)),
     )

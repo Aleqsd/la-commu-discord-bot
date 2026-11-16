@@ -7,7 +7,7 @@ import logging
 import socket
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Tuple
-from urllib.parse import urldefrag, urljoin
+from urllib.parse import urldefrag, urljoin, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup, Tag
@@ -28,6 +28,12 @@ DROPPED_TAGS = ["script", "style", "noscript", "svg", "img", "nav"]
 CHROME_TAGS = ["header", "footer"]
 CONTENT_CONTAINERS = ["article", "main", "section"]
 MAX_LINK_LABEL_CHARS = 80
+# Per-site blocks that hold other content than the page's own (CSS selectors), keyed by
+# the site's domain; they apply to its subdomains too. LinkedIn's public post page appends
+# "More Relevant Posts" (other people's posts, often other job offers) after the post.
+SITE_NOISE_SELECTORS = {
+    "linkedin.com": (".related-posts",),
+}
 
 
 class FetchError(Exception):
@@ -172,6 +178,17 @@ def _anchor_label(anchor: Tag) -> str:
     return " ".join(text.split())[:MAX_LINK_LABEL_CHARS]
 
 
+def _site_noise_selectors(url: str) -> Tuple[str, ...]:
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ()
+    for domain, selectors in SITE_NOISE_SELECTORS.items():
+        if host == domain or host.endswith("." + domain):
+            return selectors
+    return ()
+
+
 def _extract_page(body: bytes, media_type: str, encoding: str, base_url: str) -> PageContent:
     markup = _decode(body, encoding)
     links: Tuple[str, ...] = ()
@@ -185,6 +202,10 @@ def _extract_page(body: bytes, media_type: str, encoding: str, base_url: str) ->
         for tag in soup(CHROME_TAGS):
             if not tag.decomposed and tag.find_parent(CONTENT_CONTAINERS) is None:
                 tag.decompose()
+        for selector in _site_noise_selectors(base_url):
+            for tag in soup.select(selector):
+                if not tag.decomposed:
+                    tag.decompose()
         ordered: Dict[str, None] = {}
         for anchor in soup.find_all("a"):
             link = _absolute_link(anchor.get("href"), base_url)

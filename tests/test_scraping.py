@@ -525,3 +525,50 @@ async def test_page_links_keep_the_text_of_their_first_named_anchor(monkeypatch)
         "https://studio.example.com/jobs/4": " ".join(long_title.split())[: scraping.MAX_LINK_LABEL_CHARS],
     }
     assert "https://studio.example.com/jobs/5" in page.links
+
+
+# --- Site-specific noise ----------------------------------------------------------------
+
+LINKEDIN_POST_HTML = """
+    <main>
+        <section class="core-rail">
+            <article class="main-feed-activity" data-activity-urn="urn:li:activity:1">
+                Laser Rabbit is hiring a Level Designer
+                <a href="https://lnkd.in/level-designer">Apply</a>
+            </article>
+            <section class="comment">Good luck with the hiring!</section>
+            <section class="core-section-container my-3 related-posts" data-nosnippet="true">
+                More Relevant Posts
+                <article class="main-feed-activity" data-activity-urn="urn:li:activity:2">
+                    Squanch Games is hiring a Senior Designer
+                    <a href="https://ats.rippling.com/squanch/senior-designer">Senior Designer</a>
+                </article>
+            </section>
+        </section>
+    </main>
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["www.linkedin.com", "fr.linkedin.com"])
+async def test_linkedin_related_posts_are_dropped(monkeypatch, host):
+    install_resolver(monkeypatch, {host: [PUBLIC_IP]})
+    install_transport(monkeypatch, lambda request: html_response(LINKEDIN_POST_HTML))
+
+    page = await scraping.fetch_page_text(f"https://{host}/feed/update/urn:li:activity:1", timeout=5, max_bytes=10_000)
+
+    assert "Laser Rabbit is hiring a Level Designer" in page.text
+    assert "Good luck with the hiring!" in page.text
+    assert "Squanch" not in page.text
+    assert "More Relevant Posts" not in page.text
+    assert page.links == ("https://lnkd.in/level-designer",)
+
+
+@pytest.mark.asyncio
+async def test_related_posts_class_is_kept_on_other_sites(monkeypatch):
+    install_resolver(monkeypatch, {"notlinkedin.com": [PUBLIC_IP]})
+    install_transport(monkeypatch, lambda request: html_response(LINKEDIN_POST_HTML))
+
+    page = await scraping.fetch_page_text("https://notlinkedin.com/post", timeout=5, max_bytes=10_000)
+
+    assert "Squanch Games is hiring a Senior Designer" in page.text

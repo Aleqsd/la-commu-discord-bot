@@ -1,6 +1,6 @@
 # la-commu-discord-bot
 
-`la-commu-discord-bot` is a Discord bot packaged for Scaleway Serverless Containers. It exposes slash commands that scrape job links (and referenced images), extract structured data with the OpenAI API, and redistribute formatted embeds to speciality channels (`art`, `game-design`, `dev`, `others`). The production instance currently runs on a DigitalOcean Droplet managed via `systemd`.
+`la-commu-discord-bot` is a Discord bot that exposes slash commands to scrape job links (and referenced images), extract structured data with the OpenAI API, and redistribute formatted embeds to speciality channels (`art`, `game-design`, `dev`, `others`). The production instance runs on an OVH VPS as a `systemd` service (see [Production (OVH VPS)](#production-ovh-vps)); a Docker image and a Scaleway Serverless Containers workflow are kept as alternatives.
 
 ## Quick Start
 
@@ -94,9 +94,33 @@
 
 Supported teams by default are `art`, `game_design`, `dev`, and `others`. You can extend this list by adding additional `team:id` pairs to `JOB_TEAM_CHANNEL_IDS`; any unmapped team falls back to posting issues in-command.
 
+## Production (OVH VPS)
+
+Production runs on an OVH VPS (Ubuntu) as the `systemd` unit `la-commu-discord-bot`, set up as described in [Running as a Systemd Service](#running-as-a-systemd-service-ubuntu-server):
+
+| What              | Where                                                         |
+| ----------------- | ------------------------------------------------------------- |
+| Checkout (`main`) | `/home/ubuntu/GitHub/la-commu-discord-bot`                    |
+| Virtualenv        | `.venv/` in the checkout                                      |
+| Secrets           | `la-commu-discord-bot.env` in the checkout (not committed)    |
+| Duplicate history | `data/posted_jobs.log` in the checkout                        |
+| Logs              | `sudo journalctl -u la-commu-discord-bot` and `job-caster.log` |
+
+To deploy, push to `main`, then on the VPS:
+
+```bash
+cd ~/GitHub/la-commu-discord-bot
+git pull --ff-only origin main
+.venv/bin/pip install -r requirements.txt        # only when requirements.txt changed
+sudo systemctl restart la-commu-discord-bot
+sudo journalctl -u la-commu-discord-bot -n 30 --no-pager   # expect "🚀 Logged in as ..."
+```
+
+Unfinished `/jobbot post` requests are resumed on startup, so a restart does not lose submissions.
+
 ## Scaleway Delivery Model
 
-Although production currently runs on a DigitalOcean Droplet, the project still ships with the Scaleway workflow if you want to deploy there instead.
+Production runs on the OVH VPS (see above); the project still ships with the Scaleway workflow if you want to deploy there instead.
 
 - Docker image is built locally (`make build`) and pushed to the Scaleway Container Registry (`make push`).
 - Serverless container (Always On) pulls `rg.fr-par.scw.cloud/la-commu-discord-bot/la-commu-discord-bot:latest` and runs the bot.
@@ -159,7 +183,7 @@ The helper tags the local image as `ghcr.io/<namespace>/<IMAGE>` (defaults to `l
 - Tests mock external services; avoid running them while the bot is logged into production to keep logs clean.
 - Slash-command submissions are persisted; if the bot restarts mid-process they are retried automatically (up to three attempts).
 - A lightweight health server responds on `PORT` (default `8080`) so hosting platforms can probe readiness.
-- UptimeRobot watches the public health check at https://stats.uptimerobot.com/Q2aJxylmN9/801513961 to alert if the Droplet stops responding.
+- UptimeRobot watches the public health check at https://stats.uptimerobot.com/Q2aJxylmN9/801513961 to alert if the production server stops responding.
 - Duplicate protection stores identifiers in `data/posted_jobs.log`; remove a line if you need to re-post a specific offer.
 
 ## Future Enhancements
@@ -170,15 +194,16 @@ The helper tags the local image as `ghcr.io/<namespace>/<IMAGE>` (defaults to `l
 
 ---
 
-## Running Locally as a Systemd Service (Ubuntu server)
+## Running as a Systemd Service (Ubuntu server)
 
-When running outside of Scaleway (e.g. on your own Ubuntu host), you can keep the bot
-alive in the background and view logs easily by using **systemd**.
+This is how production runs on the OVH VPS: **systemd** keeps the bot alive in the
+background, restarts it on crash or reboot, and collects its logs.
 
 ### 1. Create a virtualenv (once per machine)
 
 ```bash
-cd ~/la-commu-discord-bot
+git clone https://github.com/Aleqsd/la-commu-discord-bot.git ~/GitHub/la-commu-discord-bot
+cd ~/GitHub/la-commu-discord-bot
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
@@ -192,18 +217,15 @@ Create `/etc/systemd/system/la-commu-discord-bot.service` (requires `sudo`) with
 
 ```ini
 [Unit]
-Description=Job Caster Discord Bot
-After=network-online.target
-Wants=network-online.target
+Description=Discord Bot La Commu
+After=network.target
 
 [Service]
 Type=simple
-User=ubuntu                        # change if needed
-Group=ubuntu
-WorkingDirectory=/home/ubuntu/la-commu-discord-bot
-Environment="PYTHONUNBUFFERED=1"
-EnvironmentFile=-/home/ubuntu/la-commu-discord-bot/.env
-ExecStart=/home/ubuntu/la-commu-discord-bot/.venv/bin/python /home/ubuntu/la-commu-discord-bot/main.py --log-file /home/ubuntu/la-commu-discord-bot/logs/jobbot.log
+User=ubuntu
+WorkingDirectory=/home/ubuntu/GitHub/la-commu-discord-bot
+ExecStart=/home/ubuntu/GitHub/la-commu-discord-bot/.venv/bin/python main.py
+EnvironmentFile=/home/ubuntu/GitHub/la-commu-discord-bot/la-commu-discord-bot.env
 Restart=always
 RestartSec=3
 
@@ -211,8 +233,9 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-> `EnvironmentFile` loads your `.env` secrets (Discord token, OpenAI key, etc.).
-> `--log-file` mirrors console output into `/home/ubuntu/la-commu-discord-bot/logs/jobbot.log`; change the path if you prefer a different location.
+> `EnvironmentFile` loads the secrets (Discord token, OpenAI key, channel IDs, etc.): create
+> `la-commu-discord-bot.env` from `.env.example`.
+> Console output also goes to `job-caster.log` in the checkout; add `--log-file <path>` to `ExecStart` to change it.
 
 ### 3. Enable and start the service
 
@@ -242,14 +265,8 @@ Override `SYSTEMD_UNIT`, `SYSTEMCTL`, or `JOURNALCTL` when invoking `make` if yo
 
 ### 5. Updating code or dependencies
 
-```bash
-cd ~/la-commu-discord-bot
-git pull                               # fetch new code
-source .venv/bin/activate
-pip install -r requirements.txt
-deactivate
-sudo systemctl restart la-commu-discord-bot      # apply the changes
-```
+See [Production (OVH VPS)](#production-ovh-vps) for the deploy commands
+(`git pull --ff-only origin main`, `pip install` when needed, then `systemctl restart`).
 
 The service will automatically restart if it crashes or after a reboot,
 and logs will always be available through `journalctl`.

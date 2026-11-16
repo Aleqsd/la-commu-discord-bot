@@ -15,7 +15,7 @@ from bot.scraping import PageContent
 
 
 class DummyParser:
-    async def parse_from_text(self, *, content: str, url: str, links=()):  # pragma: no cover - not used here
+    async def parse_from_text(self, *, content: str, url: str, links=(), link_labels=None):  # pragma: no cover
         return []
 
     async def parse_from_image(self, *, image_url: str, url: str):  # pragma: no cover - not used here
@@ -29,6 +29,7 @@ class RecordingParser:
         self.error = error
         self.text_calls = []
         self.text_links = []
+        self.text_link_labels = []
         self.image_calls = []
 
     def _raise_if_failing(self, url):
@@ -36,9 +37,10 @@ class RecordingParser:
         if error:
             raise error
 
-    async def parse_from_text(self, *, content: str, url: str, links=()):
+    async def parse_from_text(self, *, content: str, url: str, links=(), link_labels=None):
         self.text_calls.append(url)
         self.text_links.append(tuple(links))
+        self.text_link_labels.append(link_labels)
         self._raise_if_failing(url)
         return [dict(job) for job in self.text_jobs]
 
@@ -154,9 +156,10 @@ def command(bot, name):
 
 
 class FetchLog(list):
-    """URLs fetched so far; ``links`` are the anchors every fake page reports."""
+    """URLs fetched so far; ``links``/``link_labels`` are the anchors every fake page reports."""
 
     links = ()
+    link_labels = {}
 
 
 @pytest.fixture
@@ -165,7 +168,7 @@ def fake_fetch(monkeypatch):
 
     async def fetch(url, *, timeout, max_bytes):
         fetched.append(url)
-        return PageContent(text="page text", links=fetched.links)
+        return PageContent(text="page text", links=fetched.links, link_labels=fetched.link_labels)
 
     monkeypatch.setattr(client_module, "fetch_page_text", fetch)
     return fetched
@@ -430,7 +433,7 @@ async def test_three_jobs_from_one_image_are_all_posted_once(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_jobs_sharing_one_apply_link_are_not_duplicates(tmp_path: Path, fake_fetch):
+async def test_jobs_sharing_one_apply_link_point_to_the_page_and_are_not_duplicates(tmp_path: Path, fake_fetch):
     shared = "https://studio.example.com/apply"
     parser = RecordingParser(
         text_jobs=[
@@ -444,7 +447,46 @@ async def test_jobs_sharing_one_apply_link_are_not_duplicates(tmp_path: Path, fa
     posted, _ = await bot._post_jobs(collected.jobs, guild)
 
     assert [job.job_title for job, _ in posted] == ["Animator", "Rigger"]
-    assert all(job.job_url == shared for job, _ in posted)
+    assert all(job.job_url == "https://studio.example.com/careers" for job, _ in posted)
+
+
+@pytest.mark.asyncio
+async def test_one_unrelated_link_given_to_several_jobs_is_replaced_by_the_page(tmp_path: Path, fake_fetch):
+    # The model gave three game design offers the same LinkedIn offer found on the page.
+    unrelated = "https://www.linkedin.com/jobs/view/4012345678"
+    fake_fetch.links = (unrelated, unrelated + "?trackingId=abc", "https://studio.example.com/jobs/level-designer")
+    parser = RecordingParser(
+        text_jobs=[
+            {"job_title": "Game Designer", "job_url": unrelated, "team": "game_design"},
+            {"job_title": "Senior Game Designer", "job_url": unrelated + "?trackingId=abc", "team": "game_design"},
+            {"job_title": "Systems Designer", "job_url": unrelated, "team": "game_design"},
+            {"job_title": "Level Designer", "job_url": "https://studio.example.com/jobs/level-designer"},
+        ]
+    )
+    bot, _ = await make_bot(tmp_path, parser)
+
+    collected = await bot._collect_jobs(reference="https://studio.example.com/careers")
+
+    assert [job["job_url"] for job in collected.jobs] == [
+        "https://studio.example.com/careers",
+        "https://studio.example.com/careers",
+        "https://studio.example.com/careers",
+        "https://studio.example.com/jobs/level-designer",
+    ]
+    assert [job["shared_link"] for job in collected.jobs] == [True, True, True, False]
+
+
+@pytest.mark.asyncio
+async def test_a_link_used_by_a_single_job_is_kept(tmp_path: Path, fake_fetch):
+    fake_fetch.links = ("https://www.linkedin.com/jobs/view/4012345678",)
+    parser = RecordingParser(
+        text_jobs=[{"job_title": "Game Designer", "job_url": "https://www.linkedin.com/jobs/view/4012345678"}]
+    )
+    bot, _ = await make_bot(tmp_path, parser)
+
+    collected = await bot._collect_jobs(reference="https://www.linkedin.com/posts/studio-hiring")
+
+    assert collected.jobs[0]["job_url"] == "https://www.linkedin.com/jobs/view/4012345678"
 
 
 @pytest.mark.parametrize(
@@ -764,3 +806,15 @@ async def test_page_links_reach_the_parser_on_post_and_on_retry(tmp_path: Path, 
     await bot._retry_request(entry)
 
     assert parser.text_links == [fake_fetch.links, fake_fetch.links]
+
+
+@pytest.mark.asyncio
+async def test_link_texts_reach_the_parser(tmp_path: Path, fake_fetch):
+    fake_fetch.links = ("https://jobs.lever.co/studio/1",)
+    fake_fetch.link_labels = {"https://jobs.lever.co/studio/1": "Game Designer"}
+    parser = RecordingParser(text_jobs=[{"job_title": "Game Designer", "team": "game_design"}])
+    bot, _ = await make_bot(tmp_path, parser)
+
+    await bot._collect_jobs(reference="https://studio.example.com/careers")
+
+    assert parser.text_link_labels == [{"https://jobs.lever.co/studio/1": "Game Designer"}]

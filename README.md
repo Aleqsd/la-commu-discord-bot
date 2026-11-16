@@ -27,6 +27,7 @@
 - Slash commands return friendly, developer-focused feedback (with troubleshooting notes when parsing fails).
 - Configurable channel mapping and OpenAI models (separate text vs. vision) via environment variables.
 - Ready-to-run Docker image.
+- Links each job to its own posting when the page links to it (the model sees every link with its text); when several offers from one page would get the same link, they link to the page itself instead.
 - Skips reposting jobs that were already shared by tracking them in `data/posted_jobs.log` (normalized job URL; URL + company + title when several offers from one source share a link).
 
 ## Requirements

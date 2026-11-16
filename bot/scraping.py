@@ -6,11 +6,11 @@ import ipaddress
 import logging
 import socket
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urldefrag, urljoin
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from .utils import run_blocking
 
@@ -27,6 +27,7 @@ DROPPED_TAGS = ["script", "style", "noscript", "svg", "img", "nav"]
 # (where a <header> often holds the job title).
 CHROME_TAGS = ["header", "footer"]
 CONTENT_CONTAINERS = ["article", "main", "section"]
+MAX_LINK_LABEL_CHARS = 80
 
 
 class FetchError(Exception):
@@ -43,6 +44,9 @@ class PageContent:
     # Absolute http(s) targets of the page's <a href> links, without fragments,
     # deduplicated in page order.
     links: Tuple[str, ...] = field(default_factory=tuple)
+    # Visible text (else title / aria-label) of the first anchor naming each link, so the
+    # model can tell which link belongs to which job. Links without any text are absent.
+    link_labels: Mapping[str, str] = field(default_factory=dict)
 
 
 async def _resolve_host(host: str, port: int) -> List[str]:
@@ -157,9 +161,21 @@ def _absolute_link(href: object, base_url: str) -> Optional[str]:
     return absolute
 
 
+def _anchor_label(anchor: Tag) -> str:
+    text = anchor.get_text(" ", strip=True)
+    if not text:
+        for attribute in ("title", "aria-label"):
+            value = anchor.get(attribute)
+            if isinstance(value, str) and value.strip():
+                text = value
+                break
+    return " ".join(text.split())[:MAX_LINK_LABEL_CHARS]
+
+
 def _extract_page(body: bytes, media_type: str, encoding: str, base_url: str) -> PageContent:
     markup = _decode(body, encoding)
     links: Tuple[str, ...] = ()
+    labels: Dict[str, str] = {}
     if media_type == "text/plain":
         text = markup
     else:
@@ -169,11 +185,20 @@ def _extract_page(body: bytes, media_type: str, encoding: str, base_url: str) ->
         for tag in soup(CHROME_TAGS):
             if not tag.decomposed and tag.find_parent(CONTENT_CONTAINERS) is None:
                 tag.decompose()
-        resolved = (_absolute_link(anchor.get("href"), base_url) for anchor in soup.find_all("a"))
-        links = tuple(dict.fromkeys(link for link in resolved if link))
+        ordered: Dict[str, None] = {}
+        for anchor in soup.find_all("a"):
+            link = _absolute_link(anchor.get("href"), base_url)
+            if not link:
+                continue
+            ordered.setdefault(link, None)
+            if link not in labels:
+                label = _anchor_label(anchor)
+                if label:
+                    labels[link] = label
+        links = tuple(ordered)
         text = soup.get_text(separator="\n")
     cleaned = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-    return PageContent(text=cleaned, links=links)
+    return PageContent(text=cleaned, links=links, link_labels=labels)
 
 
 async def fetch_page_text(url: str, *, timeout: float, max_bytes: int) -> Optional[PageContent]:

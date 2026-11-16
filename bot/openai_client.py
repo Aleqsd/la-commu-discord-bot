@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 from urllib.parse import urlsplit
 
 import openai
@@ -40,12 +40,16 @@ MAX_PROMPT_CHARS = 30000
 # Links appended after the page text so the model can copy each posting's exact URL.
 MAX_PROMPT_LINKS = 60
 MAX_LINK_CHARS = 200
-MAX_LINKS_SECTION_CHARS = 6000
+MAX_LINKS_SECTION_CHARS = 9000
 JOB_LINK_HINTS = ("job", "career", "position", "apply", "opening", "vacanc")
 LINKS_SECTION_HEADER = (
-    "\nLinks found on the page. For each job, set job_url to the exact link from this list "
-    "that points to that specific posting; omit job_url if none does.\n"
+    "\nLinks found on the page, each followed by its link text when it has one. For each job, "
+    "set job_url to the exact link from this list whose text or address shows that it is that "
+    "specific posting. Never give the same job_url to two different jobs, and never use links to "
+    "other offers (similar or recommended jobs), social profiles or generic pages: "
+    "omit job_url if no link clearly matches.\n"
 )
+LINK_LABEL_SEPARATOR = " | link text: "
 MAX_OUTPUT_TOKENS = 16000
 DEFAULT_TIMEOUT = 60.0
 
@@ -111,11 +115,12 @@ class OpenAIJobParser:
         content: str,
         url: str,
         links: Iterable[str] = (),
+        link_labels: Optional[Mapping[str, str]] = None,
     ) -> List[Dict[str, Any]]:
         if not content:
             return []
         prompt = TEXT_PROMPT_TEMPLATE.format(url=url, content=content[:MAX_PROMPT_CHARS])
-        prompt += build_links_section(links, url)
+        prompt += build_links_section(links, url, link_labels)
         messages = _build_text_messages(prompt)
         raw_text = await self._call_openai(messages, model=self._text_model)
         return _extract_jobs(raw_text)
@@ -188,14 +193,20 @@ def _looks_like_job_link(link: str, source_host: str) -> bool:
     return any(hint in path for hint in JOB_LINK_HINTS)
 
 
-def build_links_section(links: Iterable[str], source_url: str) -> str:
+def build_links_section(
+    links: Iterable[str],
+    source_url: str,
+    labels: Optional[Mapping[str, str]] = None,
+) -> str:
     """List the page's links for the model, job-looking ones first; "" when there are none.
 
     Keeps http(s) links of at most MAX_LINK_CHARS (longer ones are skipped rather than cut,
     since a cut URL is useless), deduplicated, at most MAX_PROMPT_LINKS of them and
     MAX_LINKS_SECTION_CHARS in total. Job-looking links (another host than the source, or a
-    path mentioning jobs/careers/...) come first; the rest fill up in page order.
+    path mentioning jobs/careers/...) come first; the rest fill up in page order. A link's
+    text from ``labels`` follows it on its line, so the model can match links to jobs.
     """
+    labels = labels or {}
     source_host = _site_host(source_url)
     candidates: List[str] = []
     seen = set()
@@ -216,7 +227,9 @@ def build_links_section(links: Iterable[str], source_url: str) -> str:
     lines: List[str] = []
     size = len(LINKS_SECTION_HEADER)
     for link in preferred + others:
-        line = f"- {link}\n"
+        label = labels.get(link)
+        label = " ".join(label.split()) if isinstance(label, str) else ""
+        line = f"- {link}{LINK_LABEL_SEPARATOR}{label}\n" if label else f"- {link}\n"
         if len(lines) >= MAX_PROMPT_LINKS or size + len(line) > MAX_LINKS_SECTION_CHARS:
             break
         lines.append(line)

@@ -494,3 +494,34 @@ async def test_page_links_are_resolved_against_the_final_url(monkeypatch):
         "https://studio.example.com/en/careers/456",
         "https://boards.greenhouse.io/studio/jobs/789",
     )
+
+
+@pytest.mark.asyncio
+async def test_page_links_keep_the_text_of_their_first_named_anchor(monkeypatch):
+    install_resolver(monkeypatch, {"studio.example.com": [PUBLIC_IP]})
+    long_title = "Game Designer " * 20
+    html = f"""
+        <main>
+            <a href="https://www.linkedin.com/company/studio"><span></span></a>
+            <a href="https://www.linkedin.com/company/studio">Follow us</a>
+            <a href="/jobs/1"><span>Senior   Game</span>
+               <span>Designer</span></a>
+            <a href="/jobs/1">Apply</a>
+            <a href="/jobs/2" title="Level Designer"></a>
+            <a href="/jobs/3" aria-label="Narrative Designer"> </a>
+            <a href="/jobs/4">{long_title}</a>
+            <a href="/jobs/5"></a>
+        </main>
+    """
+    install_transport(monkeypatch, lambda request: html_response(html))
+
+    page = await scraping.fetch_page_text("https://studio.example.com/careers", timeout=5, max_bytes=10_000)
+
+    assert page.link_labels == {
+        "https://www.linkedin.com/company/studio": "Follow us",
+        "https://studio.example.com/jobs/1": "Senior Game Designer",
+        "https://studio.example.com/jobs/2": "Level Designer",
+        "https://studio.example.com/jobs/3": "Narrative Designer",
+        "https://studio.example.com/jobs/4": " ".join(long_title.split())[: scraping.MAX_LINK_LABEL_CHARS],
+    }
+    assert "https://studio.example.com/jobs/5" in page.links

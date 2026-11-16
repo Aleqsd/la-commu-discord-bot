@@ -96,6 +96,27 @@ def resolve_image_job_url(candidate: object, source_ref: str) -> str:
     return _https_url(candidate) or source_ref
 
 
+def _reset_links_shared_by_page_jobs(items: List[Dict[str, object]], source_url: str) -> None:
+    """Point jobs back to the page when several of them got the same link.
+
+    The model is asked for the link of each specific posting: one link given to several
+    different jobs (a social profile, a "similar jobs" offer, a common apply page) is not
+    that, so the page listing them is used instead.
+    """
+    source_key = normalize_url(source_url)
+    counts = Counter(normalize_url(str(item.get("job_url") or "")) for item in items)
+    for item in items:
+        key = normalize_url(str(item.get("job_url") or ""))
+        if key and key != source_key and counts[key] > 1:
+            logger.warning(
+                "🔗 '%s' shared link %s with other jobs from %s; using the page instead",
+                item.get("job_title"),
+                item.get("job_url"),
+                source_url,
+            )
+            item["job_url"] = source_url
+
+
 def _mark_shared_job_urls(items: List[Dict[str, object]]) -> None:
     """Flag jobs from one source that share a link (the page, the poster, a common apply page).
 
@@ -738,7 +759,12 @@ class LaCommuDiscordBot(commands.Bot):
             return [], f"Couldn't fetch content from {url}"
 
         # The retry-on-restart path re-fetches the page, so it gets fresh links too.
-        jobs_data = await self.parser.parse_from_text(content=page.text, url=url, links=page.links)
+        jobs_data = await self.parser.parse_from_text(
+            content=page.text,
+            url=url,
+            links=page.links,
+            link_labels=page.link_labels,
+        )
         if not jobs_data:
             return [], f"Couldn't parse job details from {url}"
 
@@ -746,6 +772,7 @@ class LaCommuDiscordBot(commands.Bot):
         for item in jobs_data:
             item["job_url"] = resolve_page_job_url(item.get("job_url"), url, page_links)
             item["source_url"] = url
+        _reset_links_shared_by_page_jobs(jobs_data, url)
         _mark_shared_job_urls(jobs_data)
         logger.info("📦 Parsed %d job(s) from %s", len(jobs_data), url)
         return jobs_data, None

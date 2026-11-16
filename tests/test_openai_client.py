@@ -437,3 +437,45 @@ def test_text_prompt_lists_links_after_the_capped_page_text():
     section = prompt[len(base):]
     assert section.index("https://jobs.lever.co/studio/42") < section.index("https://studio.example.com/about")
     assert len(prompt) <= len(base) + MAX_LINKS_SECTION_CHARS
+
+
+def test_links_section_shows_each_link_text():
+    from bot.openai_client import LINK_LABEL_SEPARATOR, build_links_section
+
+    links = [
+        "https://jobs.lever.co/studio/42",
+        "https://www.linkedin.com/company/studio",
+        "https://jobs.lever.co/studio/43",
+    ]
+    labels = {
+        "https://jobs.lever.co/studio/42": "Senior\n  Game Designer",
+        "https://www.linkedin.com/company/studio": "Follow us",
+        "https://jobs.lever.co/studio/43": "   ",
+    }
+
+    section = build_links_section(links, "https://studio.example.com/careers", labels)
+
+    assert section.splitlines()[-3:] == [
+        f"- https://jobs.lever.co/studio/42{LINK_LABEL_SEPARATOR}Senior Game Designer",
+        f"- https://www.linkedin.com/company/studio{LINK_LABEL_SEPARATOR}Follow us",
+        "- https://jobs.lever.co/studio/43",
+    ]
+    assert "Never give the same job_url to two different jobs" in section
+
+
+def test_text_prompt_includes_link_texts():
+    import asyncio
+
+    parser, responses = _parser_with_fake_client()
+
+    asyncio.run(
+        parser.parse_from_text(
+            content="Game Designer wanted",
+            url="https://studio.example.com/careers",
+            links=["https://jobs.lever.co/studio/42"],
+            link_labels={"https://jobs.lever.co/studio/42": "Game Designer"},
+        )
+    )
+
+    prompt = responses.calls[0]["input"][1]["content"]
+    assert prompt.rstrip().endswith("- https://jobs.lever.co/studio/42 | link text: Game Designer")
